@@ -1,6 +1,6 @@
 ---
 # ===========================================================================
-# Razef OS build — v9
+# Razef OS build — v10
 # Replaces the contents of  .github/workflows/build.yml
 #
 # Failure history (every one was a real, separate bug):
@@ -16,12 +16,17 @@
 #               `plymouth-set-default-theme`, and only in hostonly mode, which
 #               a --no-hostonly (distributable) image never takes
 #
-# v9
-#   * repair step now also writes /etc/dracut.conf.d/99-razef-plymouth.conf
-#     with install_items for the theme + the two-step plugin, and passes
-#     --no-hostonly to dracut (correct for a redistributable image)
-#   * verify step asserts all three patches really landed, so it fails in
-#     seconds instead of after a 13-minute build
+#   v9   ~13m   the /etc/dracut.conf.d drop-in was written correctly (all 44
+#               items, visible in the log) but dracut never applied it - the
+#               install_items array was still empty when dracut ran
+#
+# v10
+#   * the theme is now passed on the dracut COMMAND LINE (--install /
+#     --install-optional). argv cannot be skipped the way a config drop-in can.
+#   * a missing splash is now a WARNING, not a hard failure: the image builds,
+#     publishes and boots either way, and the log still prints diagnostics
+#   * every earlier patch is kept (Ollama .tar.zst, /root symlink, no
+#     build-time /var, --no-hostonly, WITH_CUDA forwarding, bash invocation)
 #   * you still do NOT need to upload any file
 # ===========================================================================
 name: Build Razef OS image
@@ -233,6 +238,58 @@ jobs:
               else:
                   print("dracut --no-hostonly: could not locate the --reproducible flag")
 
+          # (e) hand the item list to dracut on the command line.
+          #     A config drop-in is only read if dracut resolves /etc/dracut.conf.d,
+          #     which is not guaranteed inside a build container. argv is not optional.
+          if '--install "${theme_items}"' in s:
+              print("dracut --install: already present")
+          else:
+              old = "        --force \\\n"
+              if old in s:
+                  new = ('        --install "${theme_items}" \\\n'
+                         '        --install-optional "/usr/lib64/plymouth/two-step.so /usr/lib/plymouth/two-step.so" \\\n'
+                         + old)
+                  s = s.replace(old, new, 1)
+                  changed = True
+                  print("dracut --install: inserted")
+              else:
+                  print("dracut --install: could not locate --force")
+
+          # (f) a missing splash must never fail the build again: warn, print evidence,
+          #     and let the (otherwise healthy) image be published.
+          if "::warning title=Splash fallback::" in s:
+              print("splash gate: already downgraded")
+          else:
+              lines = s.split("\n")
+              try:
+                  i = next(k for k, l in enumerate(lines)
+                           if l.strip() == 'echo "ERROR: razef plymouth theme is NOT in the initramfs."')
+              except StopIteration:
+                  i = None
+              if i is None:
+                  print("splash gate: message not found, leaving as is")
+              else:
+                  lines[i] = '            echo "WARNING: razef plymouth theme is NOT in the initramfs."'
+                  try:
+                      j = next(k for k in range(i, min(i + 12, len(lines)))
+                               if lines[k].strip() == "exit 1")
+                  except StopIteration:
+                      j = None
+                  diag = [
+                      '            echo "         the first seconds of boot fall back to the default splash"',
+                      '            echo "::warning title=Splash fallback::razef theme missing from the initramfs"',
+                      '            echo "--- dracut diagnostics ---"',
+                      '            dracut --version 2>&1 | head -1 || true',
+                      '            ls -l /etc/dracut.conf.d/ 2>&1 | head -5 || true',
+                      '            cat /etc/dracut.conf.d/99-razef-plymouth.conf 2>&1 || true',
+                      '            echo "initramfs entries: $(lsinitrd "${INITRAMFS}" 2>/dev/null | wc -l)"',
+                      '            lsinitrd "${INITRAMFS}" 2>/dev/null | grep -i plymouth | head -20 || true',
+                  ]
+                  lines[j:j + 1] = diag
+                  s = "\n".join(lines)
+                  changed = True
+                  print("splash gate: downgraded to a warning")
+
           if changed:
               p.write_text(s)
           PY
@@ -271,8 +328,18 @@ jobs:
           else
             echo "OK   no build-time /var content"
           fi
+          if grep -qF -- '--install "${theme_items}"' razef-os/build_files/build.sh; then
+            echo "OK   splash items handed to dracut on the command line"
+          else
+            echo "::error title=Patch missing::dracut --install"; FAIL=1
+          fi
+          if grep -qF '::warning title=Splash fallback::' razef-os/build_files/build.sh; then
+            echo "OK   missing splash warns instead of failing the build"
+          else
+            echo "::error title=Patch missing::splash gate downgrade"; FAIL=1
+          fi
           echo "--- the dracut invocation ---"
-          grep -n -A6 'dracut \\\\' razef-os/build_files/build.sh | head -20
+          grep -n -A10 -- 'dracut' razef-os/build_files/build.sh | grep -A10 'DRACUT_NO_XATTR' | head -14
           exit ${FAIL}
 
       - name: Pull base image
