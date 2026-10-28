@@ -1,22 +1,23 @@
 ---
 # ===========================================================================
-# Razef OS build — v5
+# Razef OS build — v6
 #
 # Replaces the contents of  .github/workflows/build.yml
 #
-# Failure history (each one was a different, real bug):
-#   v1  2m29s  exit 125  build_files/build.sh had no executable bit
-#   v2  0s     exit 125  --logfile / --security-opt don't exist in podman 4.x
-#   v3  0s     exit 125  `podman pull --retry` doesn't exist in podman 4.x
-#   v4  ~1m    exit 125  "no FROM statement found"
-#                        -> ARG BASE_IMAGE was declared AFTER the first FROM,
-#                           which makes it stage-local, so `FROM ${BASE_IMAGE}`
-#                           expanded to an empty string.
+# Failure history:
+#   v1  2m29s  build_files/build.sh had no executable bit
+#   v2  0s     --logfile / --security-opt don't exist in podman 4.x
+#   v3  0s     `podman pull --retry` doesn't exist in podman 4.x
+#   v4  ~1m    ARG BASE_IMAGE was declared after the first FROM
+#   v5  ~9m    Ollama download 404: upstream moved from .tgz to .tar.zst
 #
-# v5 repairs that file in place before building (no repo edit needed):
-#   1. delete the "# syntax=" BuildKit frontend line  (Docker Hub rate limits)
-#   2. hoist "ARG BASE_IMAGE" above the first FROM     (fixes no-FROM error)
-#   3. print the result and hard-fail if the order is still wrong
+# v6 changes
+#   * builds the image with the CURRENT Ollama artifact names (handled inside
+#     build_files/build.sh, which must be updated once — see below)
+#   * CUDA backends are opt-in per image: the NVIDIA build sets WITH_CUDA=1
+#     (+2.3 GB), the AMD/Intel build stays at CPU+Vulkan (114 MB)
+#   * repair step now also reports whether build.sh is the old or new version,
+#     so a stale file fails loudly with instructions instead of a 404
 # ===========================================================================
 name: Build Razef OS image
 
@@ -42,8 +43,10 @@ jobs:
         include:
           - image: razef-os
             base: ghcr.io/ublue-os/bazzite-gnome:stable
+            cuda: 0
           - image: razef-os-nvidia
             base: ghcr.io/ublue-os/bazzite-gnome-nvidia-open:stable
+            cuda: 1
 
     steps:
       - name: Checkout
@@ -69,27 +72,24 @@ jobs:
           ls -l razef-os/build_files/build.sh
 
       # ---------------------------------------------------------------------
-      # Repair the Containerfile that is in the repo, so no manual edit of a
-      # second file is needed. Everything here is verified by the step itself.
+      # Repair the Containerfile in place: drop the BuildKit frontend line and
+      # hoist ARG BASE_IMAGE above the first FROM.
       # ---------------------------------------------------------------------
       - name: Repair Containerfile
         run: |
           set -x
-          test -f razef-os/Containerfile || { echo "::error title=Missing Containerfile::razef-os/Containerfile not found in the checkout"; exit 1; }
+          test -f razef-os/Containerfile || { echo "::error title=Missing Containerfile::razef-os/Containerfile not found"; exit 1; }
           python3 - <<'PY'
           import pathlib, re, sys
 
           p = pathlib.Path("razef-os/Containerfile")
           lines = p.read_text().splitlines()
 
-          # 1. drop the BuildKit frontend directive (it pulls from Docker Hub)
           before = len(lines)
           lines = [l for l in lines if not l.lstrip().startswith("# syntax=")]
           if len(lines) != before:
               print("removed the BuildKit frontend directive")
 
-          # 2. a global ARG must appear before the first FROM, otherwise
-          #    "FROM ${BASE_IMAGE}" resolves to nothing
           args = [l for l in lines if re.match(r"^ARG\s+BASE_IMAGE", l)]
           if not args:
               args = ['ARG BASE_IMAGE="ghcr.io/ublue-os/bazzite-gnome:stable"']
@@ -100,23 +100,28 @@ jobs:
           if first_from is None:
               sys.exit("ERROR: the Containerfile has no FROM at all")
           lines[first_from:first_from] = args + [""]
-
           p.write_text("\n".join(lines) + "\n")
           print("hoisted:", args[0])
           PY
 
-          echo "--- first 12 lines after repair ---"
-          head -12 razef-os/Containerfile
-
-          # 3. verify the order really is correct
           ARG_LINE=$(grep -n '^ARG BASE_IMAGE' razef-os/Containerfile | head -1 | cut -d: -f1)
           FROM_LINE=$(grep -n '^FROM' razef-os/Containerfile | head -1 | cut -d: -f1)
           echo "ARG BASE_IMAGE on line ${ARG_LINE}, first FROM on line ${FROM_LINE}"
-          if [ -z "${ARG_LINE}" ] || [ "${ARG_LINE}" -ge "${FROM_LINE}" ]; then
-            echo "::error title=Containerfile repair failed::ARG BASE_IMAGE must come before the first FROM"
+          [ -n "${ARG_LINE}" ] && [ "${ARG_LINE}" -lt "${FROM_LINE}" ] || {
+            echo "::error title=Containerfile repair failed::ARG BASE_IMAGE must come before the first FROM"; exit 1; }
+
+      # ---------------------------------------------------------------------
+      # Guard against a stale build_files/build.sh (the file that downloads
+      # Ollama). If it still contains the old .tgz URL the build would 404.
+      # ---------------------------------------------------------------------
+      - name: Verify build.sh is up to date
+        run: |
+          set -x
+          if grep -q "ollama-linux-\${ollama_arch}.tgz\"" razef-os/build_files/build.sh; then
+            echo "::error title=build_files/build.sh is outdated::It still downloads the removed Ollama .tgz (404). Replace razef-os/build_files/build.sh with the current version from the Razef repo/zip and re-run."
             exit 1
           fi
-          grep -q 'FROM ${BASE_IMAGE}' razef-os/Containerfile && echo "OK: FROM \${BASE_IMAGE} will resolve" || echo "note: no FROM \${BASE_IMAGE} found (fine if hardcoded)"
+          grep -q 'tar.zst' razef-os/build_files/build.sh && echo "OK: build.sh uses the current .tar.zst artifacts"
 
       - name: Pull base image
         env:
@@ -129,8 +134,7 @@ jobs:
               break
             fi
             if [ "${attempt}" -eq 3 ]; then
-              echo "::error title=Pull failed::could not pull ${BASE} after 3 attempts"
-              exit 1
+              echo "::error title=Pull failed::could not pull ${BASE} after 3 attempts"; exit 1
             fi
             echo "attempt ${attempt} failed - retrying in 20s"
             sleep 20
@@ -140,12 +144,14 @@ jobs:
         env:
           IMAGE: ${{ matrix.image }}
           BASE: ${{ matrix.base }}
+          CUDA: ${{ matrix.cuda }}
         run: |
           set -o pipefail
           set -x
           podman build \
             --pull=missing \
             --build-arg BASE_IMAGE="${BASE}" \
+            --build-arg WITH_CUDA="${CUDA}" \
             --tag "localhost/${IMAGE}:stable" \
             --file razef-os/Containerfile \
             razef-os 2>&1 | tee "build-${IMAGE}.log"
@@ -159,7 +165,7 @@ jobs:
             echo
             echo '```'
             if [ -f "$LOG" ]; then
-              grep -nE 'Error|error:|denied|No space|not found|cannot|unable|failed|unknown flag' "$LOG" | tail -n 20 || true
+              grep -nE 'Error|error:|denied|No space|not found|cannot|unable|failed|unknown flag|404' "$LOG" | tail -n 20 || true
               echo "----- last 25 lines -----"
               tail -n 25 "$LOG" || true
             else
