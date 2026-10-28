@@ -1,0 +1,80 @@
+---
+# ---------------------------------------------------------------------------
+# MINIMAL build workflow for a repo where the Razef files ended up nested
+# inside a "razef-os/" folder instead of at the repository root.
+#
+# File to create on GitHub (the leading dot is typed, not something you drag):
+#
+#     .github/workflows/build.yml
+#
+# Paste this whole file into it, commit, and the build starts by itself.
+# It builds straight from razef-os/Containerfile using razef-os/ as context,
+# so the existing structure works untouched.
+# ---------------------------------------------------------------------------
+name: Build Razef OS image
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  IMAGE_REGISTRY: ghcr.io/${{ github.repository_owner }}
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.image }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: razef-os
+            base: ghcr.io/ublue-os/bazzite-gnome:stable
+          - image: razef-os-nvidia
+            base: ghcr.io/ublue-os/bazzite-gnome-nvidia-open:stable
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The runners start with ~14 GB free. A Bazzite base image needs more.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          sudo podman system prune -af || true
+          df -h /
+
+      - name: Build image
+        env:
+          IMAGE: ${{ matrix.image }}
+          BASE: ${{ matrix.base }}
+        run: |
+          set -euo pipefail
+          echo "Building ${IMAGE} from ${BASE}"
+          podman build \
+            --pull=newer \
+            --build-arg BASE_IMAGE="${BASE}" \
+            --tag "localhost/${IMAGE}:stable" \
+            --file razef-os/Containerfile \
+            razef-os
+
+      - name: Log in to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" |
+            podman login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Push image
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          OWNER="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          TARGET="ghcr.io/${OWNER}/${IMAGE}:stable"
+          podman tag "localhost/${IMAGE}:stable" "${TARGET}"
+          podman push "${TARGET}"
+          echo "✅ pushed ${TARGET}"
