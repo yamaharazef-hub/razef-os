@@ -17,6 +17,11 @@ OLLAMA_VERSION="${OLLAMA_VERSION:-latest}"
 # ---------------------------------------------------------------------------
 echo "::group:: Copying system_files"
 cp -avf /ctx/system_files/overrides/. /
+
+# GitHub's web uploader (and plain `unzip` on some systems) drops the executable
+# bit, which would silently break the launcher, the wizard and the user service.
+chmod 0755 /usr/bin/razef-assist /usr/bin/razef-firstboot
+chmod 0755 /usr/lib/razef/assist/server.py
 echo "::endgroup::"
 
 # ---------------------------------------------------------------------------
@@ -54,22 +59,84 @@ if [[ "${WITH_OLLAMA:-1}" == "1" ]]; then
         *)       echo "unsupported arch $(uname -m)"; exit 1 ;;
     esac
 
+    dnf5 install -y zstd
+
+    # Upstream moved from .tar.gz to .tar.zst in late 2026 and dropped the old
+    # filenames (they now 404). Try the current format on two mirrors, then the
+    # legacy format as a last resort.
     if [[ "${OLLAMA_VERSION}" == "latest" ]]; then
-        ollama_url="https://ollama.com/download/ollama-linux-${ollama_arch}.tgz"
+        urls=(
+            "https://ollama.com/download/ollama-linux-${ollama_arch}.tar.zst"
+            "https://github.com/ollama/ollama/releases/latest/download/ollama-linux-${ollama_arch}.tar.zst"
+        )
     else
-        ollama_url="https://github.com/ollama/ollama/releases/download/v${OLLAMA_VERSION}/ollama-linux-${ollama_arch}.tgz"
+        urls=(
+            "https://github.com/ollama/ollama/releases/download/v${OLLAMA_VERSION}/ollama-linux-${ollama_arch}.tar.zst"
+            "https://ollama.com/download/ollama-linux-${ollama_arch}.tar.zst?version=${OLLAMA_VERSION}"
+        )
     fi
 
-    curl --retry 5 --retry-delay 3 -fL -o /tmp/ollama.tgz "${ollama_url}"
-    mkdir -p /usr/lib/ollama
-    tar -xzf /tmp/ollama.tgz -C /usr/lib/ollama --strip-components=0
-    rm -f /tmp/ollama.tgz
+    # NOT /tmp: the Containerfile mounts /tmp as tmpfs, whose size depends on
+    # the host RAM. The Ollama archive is 1.4 GB, so use the normal disk.
+    archive=/var/tmp/ollama-archive
+    got=0
+    for url in "${urls[@]}"; do
+        echo "downloading ${url}"
+        if curl --retry 3 --retry-delay 5 --connect-timeout 20 -fL -o "${archive}" "${url}"; then
+            got=1
+            echo "OK: downloaded from ${url}"
+            break
+        fi
+        echo "  ...failed, trying the next mirror"
+    done
 
-    # The tarball ships bin/ and lib/ at its root
-    install -Dm755 /usr/lib/ollama/bin/ollama /usr/bin/ollama
-    if [[ -d /usr/lib/ollama/lib/ollama ]]; then
-        ln -sfn /usr/lib/ollama/lib/ollama /usr/lib/ollama-libs
+    if [[ "${got}" == "0" ]]; then
+        for url in \
+            "https://ollama.com/download/ollama-linux-${ollama_arch}.tgz" \
+            "https://github.com/ollama/ollama/releases/latest/download/ollama-linux-${ollama_arch}.tgz"
+        do
+            echo "downloading (legacy) ${url}"
+            if curl --retry 3 --retry-delay 5 -fL -o "${archive}" "${url}"; then got=2; break; fi
+        done
     fi
+
+    if [[ "${got}" == "0" ]]; then
+        echo "ERROR: could not download Ollama from any mirror"
+        exit 1
+    fi
+
+    install -d /usr/lib/ollama
+
+    # Measured: CPU + Vulkan backends = ~114 MB, the two CUDA trees = ~2.3 GB.
+    # Only the NVIDIA image needs CUDA (WITH_CUDA=1 in CI). Vulkan still gives
+    # AMD/Intel GPUs hardware acceleration.
+    exclude_args=()
+    if [[ "${WITH_CUDA:-0}" != "1" ]]; then
+        exclude_args=(--exclude='lib/ollama/cuda_v12/*' --exclude='lib/ollama/cuda_v13/*')
+        echo "CUDA backends skipped (WITH_CUDA=${WITH_CUDA:-0}): CPU + Vulkan only"
+    else
+        echo "CUDA backends included (WITH_CUDA=1)"
+    fi
+
+    if [[ "${got}" == "1" ]]; then
+        zstd -dc "${archive}" | tar -xf - -C /usr/lib/ollama ${exclude_args[@]+"${exclude_args[@]}"}
+    else
+        tar -xzf "${archive}" -C /usr/lib/ollama ${exclude_args[@]+"${exclude_args[@]}"}
+    fi
+    rm -f "${archive}"
+
+    # --exclude only skips the files, the (now empty) directories remain
+    if [[ "${WITH_CUDA:-0}" != "1" ]]; then
+        rm -rf /usr/lib/ollama/lib/ollama/cuda_v12 /usr/lib/ollama/lib/ollama/cuda_v13
+    fi
+
+    # Layout is bin/ollama + lib/ollama/*. The binary finds its libraries
+    # relative to its real path, so a symlink is enough - and it avoids keeping
+    # a second ~100 MB copy of the binary around.
+    ln -sfn /usr/lib/ollama/bin/ollama /usr/bin/ollama
+
+    # Fail the build here rather than shipping an assistant that cannot start.
+    /usr/bin/ollama --version || { echo "ERROR: the Ollama binary does not run"; exit 1; }
 
     # system user + state dirs that live on the writable /var
     if ! getent group ollama >/dev/null; then
