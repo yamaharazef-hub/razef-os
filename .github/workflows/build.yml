@@ -1,6 +1,6 @@
 ---
 # ===========================================================================
-# Razef OS build — v10
+# Razef OS build — v11
 # Replaces the contents of  .github/workflows/build.yml
 #
 # Failure history (every one was a real, separate bug):
@@ -27,6 +27,12 @@
 #     publishes and boots either way, and the log still prints diagnostics
 #   * every earlier patch is kept (Ollama .tar.zst, /root symlink, no
 #     build-time /var, --no-hostonly, WITH_CUDA forwarding, bash invocation)
+#
+# v11
+#   * third image: razef-os-ally, built on bazzite-deck-gnome so handhelds
+#     (ROG Ally X and friends) keep Steam Gaming Mode + the handheld stack
+#   * splash check no longer false-negatives on `lsinitrd | grep -q` under
+#     set -o pipefail (grep exits early -> SIGPIPE -> pipeline returns 141)
 #   * you still do NOT need to upload any file
 # ===========================================================================
 name: Build Razef OS image
@@ -57,6 +63,13 @@ jobs:
           - image: razef-os-nvidia
             base: ghcr.io/ublue-os/bazzite-gnome-nvidia-open:stable
             cuda: 1
+          # Handhelds (ROG Ally / Ally X, Legion Go, Steam Deck, ...).
+          # bazzite-deck-gnome = Steam Gaming Mode + GNOME desktop mode +
+          # the handheld stack (InputPlumber / OpenGamepadUI, TDP in Steam).
+          # Building on the plain desktop image would strip all of that.
+          - image: razef-os-ally
+            base: ghcr.io/ublue-os/bazzite-deck-gnome:stable
+            cuda: 0
 
     steps:
       - name: Checkout
@@ -254,6 +267,21 @@ jobs:
                   print("dracut --install: inserted")
               else:
                   print("dracut --install: could not locate --force")
+
+          # (g) `lsinitrd | grep -q` is a false negative under `set -o pipefail`:
+          #     grep -q exits at the first match, lsinitrd dies of SIGPIPE and the
+          #     pipeline reports 141, so a theme that IS present reads as missing.
+          pipe_check = '        if lsinitrd "${INITRAMFS}" | grep -q \'plymouth/themes/razef\'; then'
+          if pipe_check in s:
+              fixed = "\n".join([
+                  '        INITRD_LIST="$(lsinitrd "${INITRAMFS}" 2>/dev/null || true)"',
+                  '        if [[ "${INITRD_LIST}" == *plymouth/themes/razef* ]]; then',
+              ])
+              s = s.replace(pipe_check, fixed, 1)
+              changed = True
+              print("splash check: pipefail false negative removed")
+          else:
+              print("splash check: already robust")
 
           # (f) a missing splash must never fail the build again: warn, print evidence,
           #     and let the (otherwise healthy) image be published.
