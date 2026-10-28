@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Razef Setup
+Comment=First-run setup for Razef OS
+Exec=/usr/bin/razef-firstboot --autostart
+Icon=razef-os
+Terminal=false
+OnlyShowIn=GNOME;
+X-GNOME-Autostart-Delay=8
+NoDisplay=false

@@ -1,0 +1,8 @@
+# bootc-image-builder config for a plain VM disk
+[[customizations.user]]
+name = "razef"
+groups = ["wheel"]
+key = ""
+
+[customizations.services]
+enabled = ["ollama.service"]

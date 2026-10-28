@@ -1,0 +1,15 @@
+[Unit]
+Description=Razef Assistant backend
+Documentation=man:razef-assist(1)
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/razef-assist --serve
+Restart=on-failure
+RestartSec=2
+Environment=RAZEF_LOCAL=1
+
+[Install]
+WantedBy=default.target

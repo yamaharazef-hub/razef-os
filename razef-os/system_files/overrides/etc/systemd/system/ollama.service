@@ -1,0 +1,27 @@
+[Unit]
+Description=Ollama local AI engine (Razef Assistant)
+Documentation=https://github.com/ollama/ollama
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ollama
+Group=ollama
+# State lives on /var so models survive image updates
+Environment="HOME=/var/lib/ollama"
+Environment="OLLAMA_MODELS=/var/lib/ollama/models"
+Environment="OLLAMA_HOST=127.0.0.1:11434"
+Environment="OLLAMA_KEEP_ALIVE=24h"
+Environment="OLLAMA_FLASH_ATTENTION=1"
+Environment="OLLAMA_NUM_PARALLEL=2"
+Environment="PATH=/usr/local/bin:/usr/bin:/usr/sbin"
+ExecStart=/usr/bin/ollama serve
+Restart=always
+RestartSec=3
+# Leave some headroom for games and the compositor
+Nice=5
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,201 @@
+#!/usr/bin/env python3
+"""
+razef-assist - desktop launcher
+===============================
+
+Starts the local backend (if it is not already running) and opens the
+assistant in a native WebKit window. Falls back gracefully:
+
+    GTK4 + WebKitGTK 6.0  ->  GTK3 + WebKit2GTK 4.x  ->  default browser
+
+Usage
+    razef-assist              open the assistant
+    razef-assist --serve      run only the backend (systemd user unit)
+    razef-assist --url        print the URL and exit
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import sys
+import time
+import urllib.request
+
+PORT = int(os.environ.get("RAZEF_ASSIST_PORT", "8765"))
+URL = f"http://127.0.0.1:{PORT}/"
+SERVER = "/usr/lib/razef/assist/server.py"
+TITLE = "Razef Assistant"
+
+
+def log(msg: str) -> None:
+    sys.stderr.write(f"razef-assist: {msg}\n")
+
+
+def is_up(timeout: float = 1.0) -> bool:
+    try:
+        with urllib.request.urlopen(URL + "api/health", timeout=timeout) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
+def ensure_server(wait: float = 12.0) -> bool:
+    """Start the backend and wait until it answers."""
+    if is_up():
+        return True
+
+    # 1. systemd user unit (cleanest: survives the window closing)
+    if shutil.which("systemctl"):
+        try:
+            subprocess.run(
+                ["systemctl", "--user", "start", "razef-assist.service"],
+                capture_output=True,
+                timeout=10,
+            )
+        except Exception:
+            pass
+
+    deadline = time.time() + wait
+    while time.time() < deadline:
+        if is_up():
+            return True
+        time.sleep(0.2)
+
+    # 2. spawn a private instance
+    if not os.path.exists(SERVER):
+        log(f"backend missing at {SERVER}")
+        return False
+    try:
+        subprocess.Popen(
+            [sys.executable, SERVER, "--port", str(PORT)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception as exc:
+        log(f"could not start backend: {exc}")
+        return False
+
+    deadline = time.time() + wait
+    while time.time() < deadline:
+        if is_up():
+            return True
+        time.sleep(0.2)
+    return False
+
+
+def open_gtk4(url: str) -> bool:
+    try:
+        import gi
+
+        gi.require_version("Gtk", "4.0")
+        gi.require_version("WebKit", "6.0")
+        from gi.repository import Gtk, WebKit
+    except Exception as exc:
+        log(f"gtk4/webkit6 unavailable ({exc})")
+        return False
+
+    class App(Gtk.Application):
+        def __init__(self):
+            super().__init__(application_id="org.razef.Assistant")
+
+        def do_activate(self):
+            win = Gtk.ApplicationWindow(application=self, title=TITLE)
+            win.set_default_size(1180, 820)
+
+            view = WebKit.WebView()
+            settings = view.get_settings()
+            try:
+                settings.set_enable_developer_extras(os.environ.get("RAZEF_ASSIST_DEBUG") == "1")
+                settings.set_enable_smooth_scrolling(True)
+                settings.set_hardware_acceleration_policy(
+                    WebKit.HardwareAccelerationPolicy.ALWAYS
+                )
+            except Exception:
+                pass
+
+            view.load_uri(url)
+
+            header = Gtk.HeaderBar()
+            header.set_show_title_buttons(True)
+            win.set_titlebar(header)
+            win.set_child(view)
+            win.present()
+
+    from gi.repository import GLib
+
+    GLib.set_prgname("razef-assist")
+    GLib.set_application_name(TITLE)
+    return App().run([]) == 0
+
+
+def open_gtk3(url: str) -> bool:
+    try:
+        import gi
+
+        gi.require_version("Gtk", "3.0")
+        gi.require_version("WebKit2", "4.1")
+        from gi.repository import Gtk, WebKit2
+    except Exception:
+        try:
+            import gi
+
+            gi.require_version("Gtk", "3.0")
+            gi.require_version("WebKit2", "4.0")
+            from gi.repository import Gtk, WebKit2
+        except Exception as exc:
+            log(f"gtk3/webkit2 unavailable ({exc})")
+            return False
+
+    win = Gtk.Window(title=TITLE)
+    win.set_default_size(1180, 820)
+    win.set_wmclass("razef-assist", "Razef Assistant")
+    view = WebKit2.WebView()
+    view.load_uri(url)
+    win.add(view)
+    win.connect("destroy", Gtk.main_quit)
+    win.show_all()
+    Gtk.main()
+    return True
+
+
+def open_browser(url: str) -> bool:
+    try:
+        import webbrowser
+
+        return webbrowser.open(url)
+    except Exception as exc:
+        log(f"could not open a browser: {exc}")
+        return False
+
+
+def main(argv: list[str]) -> int:
+    if "--url" in argv:
+        print(URL)
+        return 0
+
+    if "--serve" in argv:
+        import runpy
+
+        sys.argv = [SERVER, "--port", str(PORT)]
+        runpy.run_path(SERVER, run_name="__main__")
+        return 0
+
+    if not ensure_server():
+        log("the assistant backend did not come up in time")
+        return 1
+
+    # A native window is nicer, but a browser tab is never wrong.
+    for opener in (open_gtk4, open_gtk3, open_browser):
+        try:
+            if opener(URL):
+                return 0
+        except Exception as exc:
+            log(f"{opener.__name__} failed: {exc}")
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

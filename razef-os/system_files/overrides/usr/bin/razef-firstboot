@@ -1,0 +1,766 @@
+#!/usr/bin/env python3
+"""
+razef-firstboot - the Razef OS post-install setup wizard.
+
+Runs once per machine, in the GNOME session, after the first login.
+Everything it does is reversible and it never touches the immutable root:
+it installs Flatpaks, pulls a local AI model, flips GNOME settings and
+enables user services.
+
+Design notes
+------------
+* GTK4 + libadwaita, no third party modules.
+* Every page is a list of "tasks"; each task is a small, self-contained job
+  that reports progress and can fail without killing the wizard.
+* Idempotent: re-running it (ujust razef-setup) only does what is missing.
+
+Launch:
+    razef-firstboot              normal autostart (skips if already done)
+    razef-firstboot --force      run even if it was completed
+    razef-firstboot --reset      forget the "done" flag and run
+    razef-firstboot --headless   run the default task set with no GUI
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+
+STATE_DIR = Path("/var/lib/razef")
+STATE_FILE = STATE_DIR / "firstboot.json"
+USER_STATE = Path.home() / ".config" / "razef" / "firstboot.json"
+
+APP_ID = "org.razef.Setup"
+BRAND = "Razef"
+VERSION = "1.0"
+
+FLATHUB = "https://dl.flathub.org/repo/flathub.flatpakrepo"
+
+
+# ---------------------------------------------------------------------------
+# Small helpers
+# ---------------------------------------------------------------------------
+def run(argv: list[str], timeout: int = 1800) -> tuple[int, str]:
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        return p.returncode, ((p.stdout or "") + (p.stderr or "")).strip()
+    except FileNotFoundError:
+        return 127, f"command not found: {argv[0]}"
+    except subprocess.TimeoutExpired:
+        return 124, "timed out"
+    except Exception as exc:  # pragma: no cover
+        return 1, str(exc)
+
+
+def reboot_required() -> bool:
+    try:
+        return Path("/run/ostree-booted").exists() and Path(
+            "/var/lib/razef/.layered"
+        ).exists()
+    except Exception:
+        return False
+
+
+def detect_hardware() -> dict:
+    """Best-effort hardware probe used to recommend an AI model."""
+    info = {"ram_gib": 0.0, "gpu": "unknown", "vram_gib": 0.0, "disk_free_gib": 0.0, "cpu": ""}
+
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemTotal"):
+                info["ram_gib"] = round(int(line.split()[1]) / 1024 / 1024, 1)
+                break
+    except OSError:
+        pass
+
+    code, out = run(["bash", "-lc", "lspci -nn | grep -iE 'vga|3d|display' | sed 's/.*: //'"])
+    if code == 0 and out:
+        info["gpu"] = out.splitlines()[0][:80]
+
+    low = info["gpu"].lower()
+    if "nvidia" in low:
+        code, out = run(["bash", "-lc", "nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits"])
+        if code == 0 and out.strip().isdigit():
+            info["vram_gib"] = round(int(out.strip()) / 1024, 1)
+    elif "amd" in low or "radeon" in low:
+        # amdgpu exposes VRAM through sysfs
+        try:
+            for card in Path("/sys/class/drm").glob("card*/device/mem_info_vram_total"):
+                info["vram_gib"] = round(int(card.read_text().strip()) / 1024**3, 1)
+                break
+        except Exception:
+            pass
+
+    try:
+        usage = shutil.disk_usage("/var")
+        info["disk_free_gib"] = round(usage.free / 1024**3, 1)
+    except OSError:
+        pass
+
+    info["cpu"] = os.environ.get("PROCESSOR", "") or Path("/proc/cpuinfo").read_text()[:0] or ""
+    return info
+
+
+def recommend_model(hw: dict) -> tuple[str, str]:
+    """Pick a model that will actually feel good on this machine."""
+    ram, vram = hw["ram_gib"], hw["vram_gib"]
+    accel = max(ram * 0.5, vram)
+
+    if accel >= 14:
+        return "qwen3:8b", "8B — your machine has plenty of memory for it"
+    if accel >= 6:
+        return "qwen3:4b", "4B — a good balance of speed and quality"
+    return "qwen3:1.7b", "1.7B — chosen because memory is tight"
+
+
+# ---------------------------------------------------------------------------
+# Tasks
+# ---------------------------------------------------------------------------
+class Task:
+    """One unit of work shown in the wizard."""
+
+    key = "task"
+    title = "Task"
+    subtitle = ""
+    default_on = True
+    requires_network = False
+
+    def status(self) -> bool:
+        """Return True when the task is already satisfied."""
+        return False
+
+    def apply(self, report) -> tuple[bool, str]:
+        raise NotImplementedError
+
+    def __repr__(self) -> str:
+        return f"<Task {self.key}>"
+
+
+class FlathubSetup(Task):
+    key = "flathub"
+    title = "Enable Flathub"
+    subtitle = "The app store Razef installs from"
+    requires_network = True
+
+    def status(self) -> bool:
+        code, out = run(["flatpak", "remotes", "--columns=name"], timeout=30)
+        return code == 0 and "flathub" in out
+
+    def apply(self, report):
+        report("Adding the Flathub remote…")
+        code, out = run(
+            ["flatpak", "remote-add", "--if-not-exists", "flathub", FLATHUB], timeout=180
+        )
+        return code == 0, out
+
+
+class FlatpakInstall(Task):
+    key = ""
+    apps: list[str] = []
+    requires_network = True
+
+    def status(self) -> bool:
+        code, out = run(["flatpak", "list", "--app", "--columns=application"], timeout=30)
+        if code != 0:
+            return False
+        installed = {line.strip() for line in out.splitlines()}
+        return all(app in installed for app in self.apps)
+
+    def apply(self, report):
+        ok, last = True, ""
+        for app in self.apps:
+            report(f"Installing {app}…")
+            code, out = run(
+                ["flatpak", "install", "-y", "--noninteractive", "flathub", app], timeout=1800
+            )
+            if code != 0:
+                ok = False
+                last = out
+        return ok, last
+
+
+class OllamaModel(Task):
+    key = "ai_model"
+    title = "Download the local AI model"
+    subtitle = "Runs offline on this machine"
+    requires_network = True
+
+    def __init__(self, model: str):
+        self.model = model
+        self.subtitle = f"{model} — runs offline on this machine"
+
+    def status(self) -> bool:
+        code, out = run(["ollama", "list"], timeout=30)
+        return code == 0 and self.model.split(":")[0] in out
+
+    def apply(self, report):
+        report("Starting the local engine…")
+        run(["pkexec", "systemctl", "enable", "--now", "ollama.service"], timeout=120)
+        report(f"Downloading {self.model} (this can take a while)…")
+        code, out = run(["ollama", "pull", self.model], timeout=7200)
+        return code == 0, out
+
+
+class OllamaService(Task):
+    key = "ai_service"
+    title = "Start the Razef AI engine"
+    subtitle = "Ollama on 127.0.0.1:11434"
+
+    def status(self) -> bool:
+        code, out = run(["systemctl", "is-enabled", "ollama.service"], timeout=20)
+        return code == 0 and out.strip() == "enabled"
+
+    def apply(self, report):
+        report("Enabling ollama.service…")
+        code, out = run(["pkexec", "systemctl", "enable", "--now", "ollama.service"], timeout=120)
+        return code == 0, out
+
+
+class GamingTools(Task):
+    key = "gaming"
+    title = "Gaming stack"
+    subtitle = "Steam, Heroic, Lutris, MangoHud, Goverlay"
+    requires_network = True
+
+    apps = [
+        "com.valvesoftware.Steam",
+        "com.heroicgameslauncher.hgl",
+        "net.lutris.Lutris",
+        "io.github.flightlessmango.mangohud",
+        "io.github.benjamimgois.goverlay",
+        "com.ranfdev.DistroShelf",
+    ]
+
+    def status(self) -> bool:
+        code, out = run(["flatpak", "list", "--app", "--columns=application"], timeout=30)
+        if code != 0:
+            return False
+        installed = {line.strip() for line in out.splitlines()}
+        return all(a in installed for a in self.apps)
+
+    def apply(self, report):
+        ok, last = True, ""
+        for app in self.apps:
+            report(f"Installing {app.split('.')[-1]}…")
+            code, out = run(
+                ["flatpak", "install", "-y", "--noninteractive", "flathub", app], timeout=2400
+            )
+            if code != 0 and "already installed" not in out.lower():
+                ok = False
+                last = out
+        return ok, last
+
+
+class GameModeOn(Task):
+    key = "gamemode"
+    title = "Enable GameMode globally"
+    subtitle = "Priority + CPU governor for games"
+
+    def status(self) -> bool:
+        cfg = Path.home() / ".config" / "gamemode.ini"
+        return cfg.exists()
+
+    def apply(self, report):
+        report("Writing gamemode.ini…")
+        cfg = Path.home() / ".config" / "gamemode.ini"
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text(
+            "[general]\n"
+            "renice=10\n"
+            "desiredgov=performance\n"
+            "defaultgov=powersave\n"
+            "igpu_desiredgov=performance\n"
+            "softrealtime=auto\n"
+            "reaper_freq=5\n\n"
+            "[gpu]\n"
+            "apply_gpu_optimisations=accept-responsibility\n"
+            "gpu_device=0\n",
+            encoding="utf-8",
+        )
+        return True, str(cfg)
+
+
+class DconfApply(Task):
+    """Apply the Razef look through gsettings (user scope, reversible)."""
+
+    key = "look"
+    title = "Apply the Razef look"
+    subtitle = "Dark theme, wallpaper, dock, accent"
+
+    settings = [
+        ("org.gnome.desktop.interface", "color-scheme", "'prefer-dark'"),
+        ("org.gnome.desktop.interface", "accent-color", "'blue'"),
+        ("org.gnome.desktop.background", "picture-uri", "'file:///usr/share/backgrounds/razef/default.png'"),
+        ("org.gnome.desktop.background", "picture-uri-dark", "'file:///usr/share/backgrounds/razef/default.png'"),
+        ("org.gnome.desktop.background", "picture-options", "'zoom'"),
+        ("org.gnome.shell", "favorite-apps",
+         "['org.razef.Assistant.desktop','org.gnome.Nautilus.desktop','org.gnome.Console.desktop','com.valvesoftware.Steam.desktop','org.mozilla.firefox.desktop']"),
+        ("org.gnome.desktop.wm.preferences", "button-layout", "'appmenu:minimize,maximize,close'"),
+        ("org.gnome.mutter", "dynamic-workspaces", "true"),
+    ]
+
+    def status(self) -> bool:
+        code, out = run(["gsettings", "get", "org.gnome.desktop.interface", "color-scheme"], timeout=15)
+        return code == 0 and "prefer-dark" in out
+
+    def apply(self, report):
+        ok = True
+        for schema, key, value in self.settings:
+            schema_file = Path("/usr/share/glib-2.0/schemas") / f"{schema}.gschema.xml"
+            if not schema_file.exists():
+                continue
+            code, _ = run(["gsettings", "set", schema, key, value], timeout=20)
+            ok = ok and code == 0
+        report("Applied appearance settings")
+        return ok, ""
+
+
+class DevEnvironment(Task):
+    key = "dev"
+    title = "Developer environment"
+    subtitle = "Homebrew, Distrobox image, VS Code"
+    default_on = False
+    requires_network = True
+
+    def status(self) -> bool:
+        return shutil.which("brew") is not None
+
+    def apply(self, report):
+        report("Setting up Homebrew (may ask for confirmation)…")
+        code, out = run(
+            ["bash", "-lc", "/usr/bin/brew --version >/dev/null 2>&1 || "
+             "NONINTERACTIVE=1 /bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""],
+            timeout=3600,
+        )
+        report("Pulling a Distrobox dev image…")
+        run(["distrobox", "create", "--name", "dev", "--image", "registry.fedoraproject.org/fedora-toolbox:latest", "-y"], timeout=1800)
+        return code == 0, out
+
+
+class GrubBranding(Task):
+    key = "bootbrand"
+    title = "Brand the boot menu"
+    subtitle = "Razef name in the GRUB entry"
+    default_on = True
+
+    def status(self) -> bool:
+        p = Path("/etc/default/grub")
+        return p.exists() and "Razef" in p.read_text(errors="ignore")
+
+    def apply(self, report):
+        report("Setting the boot menu name…")
+        script = (
+            "f=/etc/default/grub; "
+            f'if grep -q "^GRUB_DISTRIBUTOR=" "$f"; then '
+            f'sed -i \'s|^GRUB_DISTRIBUTOR=.*|GRUB_DISTRIBUTOR="{BRAND}"|\' "$f"; '
+            f'else echo \'GRUB_DISTRIBUTOR="{BRAND}"\' >> "$f"; fi; '
+            "if command -v grub2-mkconfig >/dev/null 2>&1 && [ -d /boot/grub2 ]; then "
+            "grub2-mkconfig -o /boot/grub2/grub.cfg >/dev/null 2>&1 || true; fi"
+        )
+        code, out = run(["pkexec", "bash", "-c", script], timeout=300)
+        return code == 0, out
+
+
+class AssistantUnit(Task):
+    key = "assist_unit"
+    title = "Keep the assistant ready"
+    subtitle = "Starts the backend with your session"
+
+    def status(self) -> bool:
+        code, out = run(["systemctl", "--user", "is-enabled", "razef-assist.service"], timeout=20)
+        return code == 0 and out.strip() == "enabled"
+
+    def apply(self, report):
+        report("Enabling razef-assist user service…")
+        code, out = run(["systemctl", "--user", "enable", "razef-assist.service"], timeout=60)
+        return code == 0, out
+
+
+def build_task_list(hw: dict, model: str) -> list[Task]:
+    class _Apps(FlatpakInstall):
+        pass
+
+    steam = _Apps()
+    steam.key, steam.title = "apps_core", "Essential apps"
+    steam.subtitle = "Firefox, VLC, Flatseal, Warehouse"
+    steam.apps = [
+        "org.mozilla.firefox",
+        "org.videolan.VLC",
+        "com.github.tchx84.Flatseal",
+        "io.github.flattool.Warehouse",
+    ]
+
+    gaming = GamingTools()
+    return [
+        AssistantUnit(),
+        FlathubSetup(),
+        steam,
+        gaming,
+        GameModeOn(),
+        DconfApply(),
+        GrubBranding(),
+        OllamaService(),
+        OllamaModel(model),
+        DevEnvironment(),
+    ]
+
+
+# ---------------------------------------------------------------------------
+# State
+# ---------------------------------------------------------------------------
+def state() -> dict:
+    for path in (USER_STATE, STATE_FILE):
+        try:
+            return json.loads(path.read_text())
+        except Exception:
+            continue
+    return {}
+
+
+def save_state(data: dict) -> None:
+    for path in (STATE_FILE, USER_STATE):
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(data, indent=2))
+        except Exception:
+            pass
+
+
+def is_done() -> bool:
+    return bool(state().get("completed"))
+
+
+# ---------------------------------------------------------------------------
+# Headless mode (used by `ujust razef-setup --headless` and testing)
+# ---------------------------------------------------------------------------
+def headless() -> int:
+    hw = detect_hardware()
+    model, why = recommend_model(hw)
+    print(f"{BRAND} setup — headless")
+    print(f"  RAM: {hw['ram_gib']} GiB   GPU: {hw['gpu']}   VRAM: {hw['vram_gib']} GiB")
+    print(f"  recommended model: {model} ({why})")
+
+    tasks = build_task_list(hw, model)
+    failures = 0
+    for task in tasks:
+        if task.status():
+            print(f"  [skip] {task.title} (already done)")
+            continue
+        print(f"  [run ] {task.title}")
+        ok, out = task.apply(lambda m: print(f"         {m}"))
+        if not ok:
+            failures += 1
+            print(f"         failed: {out[:300]}")
+    save_state({"completed": True, "model": model, "at": time.time()})
+    return 1 if failures else 0
+
+
+# ---------------------------------------------------------------------------
+# GUI
+# ---------------------------------------------------------------------------
+def launch_gui(force: bool) -> int:
+    try:
+        import gi
+
+        gi.require_version("Gtk", "4.0")
+        gi.require_version("Adw", "1")
+        from gi.repository import Adw, Gio, GLib, Gtk
+    except Exception as exc:
+        print(f"GTK4/libadwaita unavailable ({exc}); falling back to headless", file=sys.stderr)
+        return headless()
+
+    hw = detect_hardware()
+    model, why = recommend_model(hw)
+    tasks = build_task_list(hw, model)
+
+    class Wizard(Adw.Application):
+        def __init__(self):
+            super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.NON_UNIQUE)
+            self.rows: dict[str, tuple] = {}
+            self.selected: dict[str, bool] = {}
+            self.log_lines: list[str] = []
+
+        # -- ui ----------------------------------------------------------
+        def do_activate(self):
+            self.win = Adw.ApplicationWindow(application=self, title="Razef Setup")
+            self.win.set_default_size(880, 700)
+
+            self.stack = Gtk.Stack()
+            self.stack.set_transition_type(Gtk.StackTransitionType.SLIDE_LEFT_RIGHT)
+
+            self.stack.add_named(self.page_welcome(hw, model, why), "welcome")
+            self.stack.add_named(self.page_choices(), "choices")
+            self.stack.add_named(self.page_run(), "run")
+            self.stack.add_named(self.page_done(), "done")
+
+            self.win.set_content(self.stack)
+            self.win.present()
+
+        def page_welcome(self, hw, model, why):
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+            box.set_margin_top(46)
+            box.set_margin_bottom(40)
+            box.set_margin_start(56)
+            box.set_margin_end(56)
+
+            logo = Gtk.Image.new_from_file("/usr/share/icons/hicolor/256x256/apps/razef-os.png")
+            logo.set_pixel_size(96)
+            box.append(logo)
+
+            title = Gtk.Label(label=f"Welcome to {BRAND}")
+            title.add_css_class("title-1")
+            box.append(title)
+
+            sub = Gtk.Label(
+                label="One short setup and this machine is yours. "
+                      "Nothing here is permanent — you can re-run it any time with <tt>ujust razef-setup</tt>."
+            )
+            sub.set_wrap(True)
+            sub.add_css_class("dim-label")
+            sub.set_use_markup(True)
+            box.append(sub)
+
+            facts = Gtk.Frame()
+            facts.add_css_class("card")
+            inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            inner.set_margin_top(14)
+            inner.set_margin_bottom(14)
+            inner.set_margin_start(16)
+            inner.set_margin_end(16)
+            for line in (
+                f"CPU threads\t{os.cpu_count()}",
+                f"Memory\t{hw['ram_gib']} GiB",
+                f"Graphics\t{hw['gpu'] or 'unknown'}",
+                f"Free space\t{hw['disk_free_gib']} GiB",
+                f"AI model\t{model}  ({why})",
+            ):
+                label, value = line.split("\t")
+                row = Gtk.Box(spacing=12)
+                l = Gtk.Label(label=label); l.add_css_class("dim-label"); l.set_xalign(0); l.set_size_request(120, -1)
+                v = Gtk.Label(label=value); v.set_xalign(0); v.set_selectable(True)
+                row.append(l); row.append(v)
+                inner.append(row)
+            facts.set_child(inner)
+            box.append(facts)
+
+            go = Gtk.Button(label="Get started")
+            go.add_css_class("suggested-action")
+            go.add_css_class("pill")
+            go.set_halign(Gtk.Align.CENTER)
+            go.set_size_request(200, -1)
+            go.connect("clicked", lambda *_: self.stack.set_visible_child_name("choices"))
+            box.append(go)
+            return box
+
+        def page_choices(self):
+            outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+
+            header = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+            header.set_margin_top(28); header.set_margin_bottom(12)
+            header.set_margin_start(32); header.set_margin_end(32)
+            h = Gtk.Label(label="What should I set up?", xalign=0)
+            h.add_css_class("title-2")
+            d = Gtk.Label(label="Everything is pre-selected where it makes sense. Uncheck what you don't want.",
+                          xalign=0, wrap=True)
+            d.add_css_class("dim-label")
+            header.append(h); header.append(d)
+            outer.append(header)
+
+            scroll = Gtk.ScrolledWindow(vexpand=True)
+            listbox = Gtk.ListBox()
+            listbox.add_css_class("boxed-list")
+            listbox.set_margin_start(32); listbox.set_margin_end(32); listbox.set_margin_bottom(18)
+            listbox.set_selection_mode(Gtk.SelectionMode.NONE)
+
+            for task in tasks:
+                done = task.status()
+                row = Adw.ActionRow(title=task.title, subtitle=task.subtitle + ("  ·  already done" if done else ""))
+                check = Gtk.CheckButton()
+                check.set_active(task.default_on and not done)
+                check.set_sensitive(not done)
+                self.selected[task.key] = check.get_active()
+                check.connect("toggled", lambda c, k=task.key: self.selected.__setitem__(k, c.get_active()))
+                row.add_prefix(check)
+                row.set_activatable_widget(check)
+                listbox.append(row)
+                self.rows[task.key] = (row, check)
+
+            scroll.set_child(listbox)
+            outer.append(scroll)
+
+            bar = Gtk.Box(spacing=10)
+            bar.set_margin_start(32); bar.set_margin_end(32); bar.set_margin_bottom(26)
+            back = Gtk.Button(label="Back")
+            back.connect("clicked", lambda *_: self.stack.set_visible_child_name("welcome"))
+            start = Gtk.Button(label="Set up Razef")
+            start.add_css_class("suggested-action")
+            start.connect("clicked", lambda *_: self.start())
+            bar.append(back)
+            spacer = Gtk.Box(); spacer.set_hexpand(True)
+            bar.append(spacer)
+            bar.append(start)
+            outer.append(bar)
+            return outer
+
+        def page_run(self):
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+            box.set_margin_top(30); box.set_margin_bottom(24)
+            box.set_margin_start(32); box.set_margin_end(32)
+
+            self.run_title = Gtk.Label(label="Setting things up…", xalign=0)
+            self.run_title.add_css_class("title-2")
+            box.append(self.run_title)
+
+            self.progress = Gtk.ProgressBar()
+            self.progress.set_show_text(True)
+            box.append(self.progress)
+
+            self.current = Gtk.Label(label="", xalign=0)
+            self.current.add_css_class("dim-label")
+            box.append(self.current)
+
+            scroll = Gtk.ScrolledWindow(vexpand=True)
+            scroll.add_css_class("card")
+            self.logview = Gtk.TextView(editable=False, monospace=True)
+            self.logview.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+            scroll.set_child(self.logview)
+            box.append(scroll)
+
+            self.next_btn = Gtk.Button(label="Continue")
+            self.next_btn.add_css_class("suggested-action")
+            self.next_btn.set_halign(Gtk.Align.END)
+            self.next_btn.set_sensitive(False)
+            self.next_btn.connect("clicked", lambda *_: self.finish())
+            box.append(self.next_btn)
+            return box
+
+        def page_done(self):
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+            box.set_margin_top(60); box.set_margin_start(56); box.set_margin_end(56)
+
+            icon = Gtk.Image.new_from_icon_name("object-select-symbolic")
+            icon.set_pixel_size(72)
+            icon.add_css_class("accent")
+            box.append(icon)
+
+            t = Gtk.Label(label="You're all set", xalign=0.5)
+            t.add_css_class("title-1")
+            box.append(t)
+
+            self.done_label = Gtk.Label(label="", wrap=True, xalign=0.5)
+            self.done_label.add_css_class("dim-label")
+            box.append(self.done_label)
+
+            row = Gtk.Box(spacing=10)
+            row.set_halign(Gtk.Align.CENTER)
+            close = Gtk.Button(label="Close")
+            close.connect("clicked", lambda *_: self.win.close())
+            ai = Gtk.Button(label="Open Razef Assistant")
+            ai.add_css_class("suggested-action")
+            ai.connect("clicked", lambda *_: run(["setsid", "razef-assist"], timeout=5))
+            row.append(close); row.append(ai)
+            box.append(row)
+            return box
+
+        # -- running ------------------------------------------------------
+        def log(self, text: str):
+            buf = self.logview.get_buffer()
+            buf.insert(buf.get_end_iter(), text + "\n")
+            self.log_lines.append(text)
+            adj = self.logview.get_parent().get_vadjustment()
+            if adj:
+                adj.set_value(adj.get_upper())
+
+        def start(self):
+            self.stack.set_visible_child_name("run")
+            threading.Thread(target=self.worker, daemon=True).start()
+
+        def worker(self):
+            chosen = [t for t in tasks if self.selected.get(t.key)]
+            total = max(1, len(chosen))
+
+            for i, task in enumerate(chosen):
+                label = f"{task.title} ({i + 1}/{len(chosen)})"
+                GLib.idle_add(self.current.set_text, label)
+                GLib.idle_add(self.progress.set_fraction, i / total)
+                GLib.idle_add(self.progress.set_text, f"{int(i / total * 100)}%")
+                GLib.idle_add(self.log, f"\n▶ {task.title}")
+
+                def report(msg, _t=task):
+                    GLib.idle_add(self.log, f"   {msg}")
+
+                try:
+                    if task.status():
+                        GLib.idle_add(self.log, "   already done, skipping")
+                        continue
+                    ok, out = task.apply(report)
+                    if not ok and out:
+                        GLib.idle_add(self.log, f"   ✗ {out[:500]}")
+                    elif ok:
+                        GLib.idle_add(self.log, "   ✓ done")
+                except Exception as exc:
+                    GLib.idle_add(self.log, f"   ✗ {exc}")
+
+            GLib.idle_add(self.progress.set_fraction, 1.0)
+            GLib.idle_add(self.progress.set_text, "100%")
+            GLib.idle_add(self.current.set_text, "Finished")
+            GLib.idle_add(self.next_btn.set_sensitive, True)
+            save_state({
+                "completed": True,
+                "model": self_model,
+                "hardware": hw,
+                "at": time.time(),
+                "tasks": {t.key: self.selected.get(t.key) for t in tasks},
+            })
+
+        def finish(self):
+            self.done_label.set_text(
+                f"{BRAND} is ready. The assistant lives in your dock and in the app grid "
+                f"as “Razef Assistant”, powered by {self_model} running locally."
+            )
+            self.stack.set_visible_child_name("done")
+
+    self_model = model
+    app = Wizard()
+
+    # headless-safe: if there is no display the GTK app cannot start
+    if not (os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY")):
+        return headless()
+
+    return app.run([])
+
+
+# ---------------------------------------------------------------------------
+def main(argv: list[str]) -> int:
+    if "--headless" in argv:
+        return headless()
+
+    if "--mark-done" in argv:
+        save_state({**state(), "completed": True, "at": time.time()})
+        return 0
+
+    if "--reset" in argv:
+        try:
+            STATE_FILE.unlink()
+        except FileNotFoundError:
+            pass
+        try:
+            USER_STATE.unlink()
+        except FileNotFoundError:
+            pass
+
+    autostart = "--autostart" in argv
+    if autostart and is_done() and "--force" not in argv:
+        return 0
+
+    return launch_gui(force="--force" in argv)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

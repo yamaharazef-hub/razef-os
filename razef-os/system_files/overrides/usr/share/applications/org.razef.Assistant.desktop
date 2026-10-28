@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Razef Assistant
+GenericName=Local AI Assistant
+Comment=Offline AI assistant that can diagnose this machine
+Exec=/usr/bin/razef-assist
+Icon=razef-assist
+Terminal=false
+Categories=Utility;System;
+Keywords=ai;assistant;chat;ollama;help;diagnose;
+StartupNotify=true
+StartupWMClass=razef-assist

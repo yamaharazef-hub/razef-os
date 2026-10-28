@@ -1,0 +1,223 @@
+set dotenv-filename := "image-template.env"
+set dotenv-load := true
+
+export image_name := env_var("IMAGE_NAME")
+export repo_organization := env_var("REPO_ORGANIZATION")
+export image_desc := env_var("IMAGE_DESC")
+export image_keywords := env_var("IMAGE_KEYWORDS")
+export image_logo_url := env_var("IMAGE_LOGO_URL")
+export default_tag := env_var("DEFAULT_TAG")
+export bib_image := env_var("BIB_IMAGE")
+
+alias build-vm := build-qcow2
+alias run-vm := run-vm-qcow2
+
+# List available recipes
+[private]
+default:
+    @just --list
+
+# Check formatting of every just file
+[group('Lint')]
+check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    find . -type f -name "*.just" -not -path "./.git/*" | while read -r file; do
+        echo "Checking syntax: ${file}"
+        just --unstable --fmt --check -f "${file}"
+    done
+    echo "Checking syntax: Justfile"
+    just --unstable --fmt --check -f Justfile
+
+# Reformat every just file
+[group('Lint')]
+fix:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    find . -type f -name "*.just" -not -path "./.git/*" | while read -r file; do
+        just --unstable --fmt -f "${file}"
+    done
+    just --unstable --fmt -f Justfile
+
+# Run shellcheck over every script
+[group('Lint')]
+lint:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v shellcheck >/dev/null || { echo "shellcheck is not installed"; exit 1; }
+    find . -iname "*.sh" -not -path "./.git/*" -exec shellcheck --severity=warning "{}" +
+
+# Byte-compile the python apps (no GTK needed)
+[group('Lint')]
+check-python:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PYTHONPYCACHEPREFIX=/tmp/razef-pycache
+    python3 -m compileall -q system_files/overrides/usr/bin system_files/overrides/usr/lib
+    echo "python: OK"
+
+# Regenerate brand assets from branding/master
+[group('Branding')]
+brand:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    python3 branding/build-assets.py
+    echo "Brand assets regenerated in branding/assets/"
+
+# Build the image locally with podman
+build target_image=image_name tag=default_tag base="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    LABELS=()
+    LABELS+=("--label" "io.artifacthub.package.deprecated=false")
+    LABELS+=("--label" "io.artifacthub.package.keywords={{ image_keywords }}")
+    LABELS+=("--label" "io.artifacthub.package.license=Apache-2.0")
+    LABELS+=("--label" "io.artifacthub.package.logo-url={{ image_logo_url }}")
+    LABELS+=("--label" "org.opencontainers.image.title={{ image_name }}")
+    LABELS+=("--label" "org.opencontainers.image.vendor={{ repo_organization }}")
+    LABELS+=("--label" "org.opencontainers.image.description={{ image_desc }}")
+    LABELS+=("--label" "org.opencontainers.image.version={{ default_tag }}.$(date +%Y%m%d)")
+    LABELS+=("--label" "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)")
+
+    ARGS=("--pull=newer" "--tag" "${target_image}:${tag}" "--file" "Containerfile")
+    if [[ -n "{{ base }}" ]]; then
+        ARGS+=("--build-arg" "BASE_IMAGE={{ base }}")
+    fi
+
+    podman build "${ARGS[@]}" "${LABELS[@]}" .
+
+# Split the image into smaller layers for faster updates
+[group('Build')]
+rechunk target_image=image_name tag=default_tag:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    CONFIG="$(mktemp)"
+    OUTDIR="$(mktemp -d "./${target_image}_chunkah_XXXXXX")"
+    trap 'rm -f "${CONFIG}"; rm -rf "${OUTDIR}"' EXIT
+
+    podman inspect "${target_image}:${tag}" >"${CONFIG}"
+    podman run --rm \
+      --mount=type=image,src="${target_image}:${tag}",target=/chunkah \
+      -v "${CONFIG}:/chunkah-config.json:ro,Z" \
+      -v "${OUTDIR}:/run/out:Z" \
+      quay.io/coreos/chunkah:latest \
+      build --verbose --compressed --max-layers 128 --prune /sysroot/ \
+      --label ostree.commit- --label ostree.final-diffid- \
+      --config /chunkah-config.json --output oci:/run/out/chunked
+
+    CHUNKED="$(podman pull "oci:${OUTDIR}/chunked")"
+    podman tag "${CHUNKED}" "${target_image}:${tag}"
+
+# Print the default tag
+[group('Utility')]
+generate-default-tag:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "{{ default_tag }}"
+
+# Print the tags this build should receive
+[group('Utility')]
+generate-build-tags target_image=image_name tag=default_tag:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    DATE="$(date +%Y%m%d)"
+    TAGS=()
+    if [[ -z "$(git status -s 2>/dev/null)" ]]; then
+        SHA="$(git rev-parse --short HEAD)"
+        TAGS+=("${tag}-${SHA}" "${tag}-${DATE}-${SHA}" "${DATE}-${SHA}")
+    fi
+    TAGS+=("${DATE}" "${tag}" "${tag}-${DATE}")
+    echo "${TAGS[*]}"
+
+# Apply a list of tags to an already built image
+[group('Utility')]
+tag-images target_image=image_name tag=default_tag tags="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    IMAGE="$(podman inspect "${target_image}:${tag}" | jq -r '.[].Id')"
+    podman untag "${IMAGE}"
+    for t in {{ tags }}; do
+        podman tag "${IMAGE}" "${target_image}:${t}"
+    done
+    podman images
+
+# Print the image name
+[group('Utility')]
+[private]
+image_name:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "{{ image_name }}"
+
+# Load the image into rootful podman (needed for image builder)
+[group('Utility')]
+[private]
+_rootful_load_image target_image=image_name tag=default_tag:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -n "${SUDO_USER:-}" || "${UID}" -eq 0 ]]; then
+        exit 0
+    fi
+    if podman image exists "${target_image}:${tag}"; then
+        TMPDIR_COPY="$(mktemp -p "${PWD}" -d -t _scp.XXXXXXXX)"
+        sudo TMPDIR="${TMPDIR_COPY}" podman image scp "${UID}@localhost::${target_image}:${tag}" "root@localhost::${target_image}:${tag}" || true
+        rm -rf "${TMPDIR_COPY}"
+    else
+        sudo podman pull "${target_image}:${tag}"
+    fi
+
+# Build a bootable image with bootc-image-builder
+[group('Virtual Machine')]
+[private]
+_build-bib target_image tag type config: (_rootful_load_image target_image tag)
+    #!/usr/bin/env bash
+    set -euo pipefail
+    TMPBUILD="$(mktemp -p "${PWD}" -d -t _bib.XXXXXXXX)"
+    sudo podman run --rm --privileged --pull=newer --net=host \
+      --security-opt label=type:unconfined_t \
+      -v "$(pwd)/{{ config }}:/config.toml:ro" \
+      -v "${TMPBUILD}:/output" \
+      -v /var/lib/containers/storage:/var/lib/containers/storage \
+      "{{ bib_image }}" \
+      --type {{ type }} --rootfs=btrfs "{{ target_image }}:{{ tag }}"
+    mkdir -p output
+    sudo mv -f "${TMPBUILD}"/* output/ 2>/dev/null || true
+    sudo rmdir "${TMPBUILD}" 2>/dev/null || true
+    sudo chown -R "${USER}:${USER}" output/ 2>/dev/null || true
+
+# Build a QCOW2 virtual machine image
+[group('Virtual Machine')]
+build-qcow2 target_image=("localhost/" + image_name) tag=default_tag: (build target_image tag) && (_build-bib target_image tag "qcow2" "disk_config/disk.toml")
+
+# Build an installer ISO with bootc-image-builder
+[group('Virtual Machine')]
+build-iso target_image=("localhost/" + image_name) tag=default_tag: (build target_image tag) && (_build-bib target_image tag "iso" "disk_config/iso.toml")
+
+# Boot the QCOW2 image in a container-based VM
+[group('Virtual Machine')]
+run-vm-qcow2 target_image=("localhost/" + image_name) tag=default_tag:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    IMG="output/qcow2/disk.qcow2"
+    if [[ ! -f "${IMG}" ]]; then
+        just build-qcow2 "{{ target_image }}" "{{ tag }}"
+    fi
+    podman run --rm --privileged --pull=newer \
+      -p 127.0.0.1:8006:8006 \
+      -e CPU_CORES=4 -e RAM_SIZE=8G -e DISK_SIZE=64G -e TPM=Y \
+      --device=/dev/kvm \
+      -v "${PWD}/${IMG}:/boot.qcow2" \
+      docker.io/qemux/qemu
+
+# Remove build artefacts
+[group('Utility')]
+clean:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rm -rf output/
+    touch _build
+    find . -maxdepth 1 -name "*_build*" -exec rm -rf {} +
+    find . -maxdepth 1 -name "_bib.*" -exec rm -rf {} +
+    find . -maxdepth 1 -name "*_chunkah_*" -exec rm -rf {} +

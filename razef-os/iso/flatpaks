@@ -1,0 +1,5 @@
+# Flatpaks pre-installed into the live ISO environment only.
+# Keep this list short - every entry grows the ISO.
+org.mozilla.firefox
+org.gnome.Nautilus
+com.github.tchx84.Flatseal

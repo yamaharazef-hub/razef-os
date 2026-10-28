@@ -1,0 +1,18 @@
+# bootc-image-builder config for a standalone installer ISO
+# WARNING: this ISO installs Razef but has no live desktop - the titanoboa
+# (Bazzite-style live installer) route in .github/workflows/build-iso.yml is
+# what you want if you plan to hand ISOs to other people.
+
+[customizations.installer.kickstart]
+contents = """
+text --non-interactive
+lang en_US.UTF-8
+keyboard us
+timezone UTC
+rootpw --lock
+user --name=razef --groups=wheel --plaintext --password=changeme
+zerombr
+clearpart --all --initlabel
+autopart --type=btrfs --noswap
+reboot
+"""
