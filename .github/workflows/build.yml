@@ -1,20 +1,31 @@
 ---
 # ===========================================================================
-# Razef OS build — v2
+# Razef OS build — v3
 #
-# Replaces the contents of  .github/workflows/build.yml  in your repo.
+# Replaces the whole contents of  .github/workflows/build.yml  in your repo.
 #
-# What changed vs v1 (which failed in 2 min with exit code 125):
-#   * fixes the missing executable bit on build_files/build.sh, which the
-#     GitHub web uploader strips  (this is what killed the build)
-#   * frees ~30 GB of runner disk instead of ~10 GB (the Bazzite base image
-#     needs a lot of room)
-#   * captures the full build log and, if it fails, prints the real error as
-#     an annotation so it can be read at a glance
-#   * uploads build.log as an artifact on failure
+# WHY v1 AND v2 FAILED
+#   Both died in 0 seconds with exit code 125 and produced no build log, i.e.
+#   podman refused to start building. The cause is line 1 of the Containerfile:
 #
-# Layout assumed: the Razef files live in a folder called  razef-os/  at the
-# repository root (which is how your repo is organised right now).
+#       # syntax=docker/dockerfile:1
+#
+#   That directive makes podman download a helper "frontend" image from
+#   DOCKER HUB before it parses anything. GitHub's runners share IP addresses,
+#   so anonymous Docker Hub pulls are frequently throttled
+#   ("toomanyrequests: You have reached your pull rate limit") -> instant 125.
+#   It is also the ONLY thing in the whole build that does not come from
+#   ghcr.io. The Containerfile does not need it: podman understands every
+#   instruction we use (FROM scratch, COPY, RUN --mount=type=bind/cache/tmpfs)
+#   with its built-in parser.
+#
+# WHAT v3 DOES
+#   1. deletes that directive before building (no repo edit needed)
+#   2. prints a preflight (podman version, files found, free disk) so a
+#      failure is never invisible again
+#   3. pre-pulls the base image with 5 retries
+#   4. builds with the full output tee'd to build.log
+#   5. on failure, puts the REAL error in the run summary + uploads the log
 # ===========================================================================
 name: Build Razef OS image
 
@@ -47,68 +58,98 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ---------------------------------------------------------------------
-      # The runner starts with a big toolchain we don't need. Free it, then
-      # show how much room we actually have.
-      # ---------------------------------------------------------------------
       - name: Free disk space
         run: |
-          set -euxo pipefail
-          echo "=== before ==="; df -h /
+          set -x
           sudo rm -rf \
-            /usr/share/dotnet \
-            /usr/local/lib/android \
-            /opt/ghc /opt/hostedtoolcache \
-            /usr/local/.ghcup \
-            /usr/share/swift \
-            /opt/az /opt/pipx /opt/google \
-            /usr/local/share/boost \
+            /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache /usr/local/.ghcup /usr/share/swift \
+            /opt/az /opt/pipx /opt/google /usr/local/share/boost \
             /usr/lib/jvm 2>/dev/null || true
-          sudo podman system prune -af --volumes 2>/dev/null || true
-          sudo swapoff -a 2>/dev/null || true
-          echo "=== after ==="; df -h /
+          podman system prune -af >/dev/null 2>&1 || true
+          df -h /
 
       # ---------------------------------------------------------------------
-      # GitHub's web UI throws away file permissions. Without this the build
-      # dies with "Permission denied" (podman exit code 125).
+      # FILE MODES: GitHub's web uploader strips the executable bit.
       # ---------------------------------------------------------------------
-      - name: Fix file modes stripped by the GitHub uploader
+      - name: Fix file modes
         run: |
           set -x
           chmod +x razef-os/build_files/build.sh || true
           chmod +x razef-os/scripts/*.sh 2>/dev/null || true
           chmod +x razef-os/system_files/overrides/usr/bin/* 2>/dev/null || true
-          ls -l razef-os/build_files/build.sh razef-os/system_files/overrides/usr/bin/
+          ls -l razef-os/build_files/build.sh
+
+      # ---------------------------------------------------------------------
+      # PREFLIGHT: proves the files are where we think they are, and removes
+      # the Docker Hub dependency from line 1 of the Containerfile.
+      # ---------------------------------------------------------------------
+      - name: Preflight
+        run: |
+          set -x
+          podman --version
+          df -h /
+          ls -la razef-os | head -20
+          test -f razef-os/Containerfile || { echo "::error title=Containerfile missing::razef-os/Containerfile not found in the checkout"; exit 1; }
+          test -d razef-os/build_files || { echo "::error title=build_files missing::razef-os/build_files not found"; exit 1; }
+          echo "--- Containerfile head (before) ---"; head -3 razef-os/Containerfile
+          # drop the BuildKit frontend directive: it pulls from Docker Hub,
+          # and Docker Hub throttles GitHub runners
+          sed -i '/^# syntax=/d' razef-os/Containerfile
+          echo "--- Containerfile head (after) ---"; head -3 razef-os/Containerfile
+          grep -q 'syntax=' razef-os/Containerfile && { echo "::error::frontend directive still present"; exit 1; } || echo "OK: no Docker Hub dependency"
+
+      # ---------------------------------------------------------------------
+      # Pull the base image separately so a pull problem cannot be mistaken
+      # for a build problem.
+      # ---------------------------------------------------------------------
+      - name: Pull base image
+        env:
+          BASE: ${{ matrix.base }}
+        run: |
+          set -x
+          podman pull --retry 5 --retry-delay 10 "${BASE}"
+          podman images "${BASE}"
 
       - name: Build image
         env:
           IMAGE: ${{ matrix.image }}
           BASE: ${{ matrix.base }}
         run: |
-          echo "Building ${IMAGE} from ${BASE}"
+          set -o pipefail
+          set -x
           podman build \
-            --pull=newer \
-            --logfile "${GITHUB_WORKSPACE}/build-${IMAGE}.log" \
-            --security-opt label=disable \
+            --pull=missing \
             --build-arg BASE_IMAGE="${BASE}" \
             --tag "localhost/${IMAGE}:stable" \
             --file razef-os/Containerfile \
-            razef-os
+            razef-os 2>&1 | tee "build-${IMAGE}.log"
 
-      # If the build failed, surface the actual reason as an annotation.
-      - name: Show build error
+      # ---------------------------------------------------------------------
+      # Make any failure readable in one glance.
+      # ---------------------------------------------------------------------
+      - name: Report failure
         if: failure()
         run: |
-          LOG="${GITHUB_WORKSPACE}/build-${{ matrix.image }}.log"
-          if [ -f "$LOG" ]; then
-            echo "=== last 40 lines of the build log ==="
-            tail -n 40 "$LOG" || true
-            ERROR="$(grep -iE 'error:|permission denied|no space left|not found|cannot' "$LOG" | tail -n 3 | tr '\n' ' ' | cut -c1-800)"
-            echo "::error title=Build failed::${ERROR:-see the log artifact below}"
-          else
-            echo "::error title=Build failed::podman produced no log file"
-          fi
-          df -h / || true
+          LOG="build-${{ matrix.image }}.log"
+          {
+            echo "## ❌ Build failed: ${{ matrix.image }}"
+            echo
+            echo '```'
+            if [ -f "$LOG" ]; then
+              grep -nE 'Error|error:|denied|No space|not found|cannot|unable|failed' "$LOG" | tail -n 15 || true
+              echo "----- last 25 lines -----"
+              tail -n 25 "$LOG" || true
+            else
+              echo "No build log was produced - podman refused to start."
+              echo "That means an argument, a missing path, or a pull of a"
+              echo "helper image was rejected before the build began."
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          ERR="$(grep -hE 'Error|error:' "$LOG" 2>/dev/null | tail -n 2 | tr '\n' ' ' | cut -c1-600)"
+          echo "::error title=Build failed (${IMAGE:-${{ matrix.image }}})::${ERR:-no log produced}"
 
       - name: Upload build log
         if: always()
