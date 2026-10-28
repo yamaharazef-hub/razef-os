@@ -1,31 +1,20 @@
 ---
 # ===========================================================================
-# Razef OS build — v3
+# Razef OS build — v4  (last one, promise)
 #
-# Replaces the whole contents of  .github/workflows/build.yml  in your repo.
+# Replaces the contents of  .github/workflows/build.yml
 #
-# WHY v1 AND v2 FAILED
-#   Both died in 0 seconds with exit code 125 and produced no build log, i.e.
-#   podman refused to start building. The cause is line 1 of the Containerfile:
+# HISTORY, so we stop repeating mistakes:
+#   v1  exit 125 in 2m29s  - build_files/build.sh had no exec bit
+#   v2  exit 125 in 0s     - used podman flags that the runner's podman
+#                            (4.x) does not have: --logfile / --security-opt
+#   v3  exit 125 in 0s     - used `podman pull --retry`, also 5.x-only
 #
-#       # syntax=docker/dockerfile:1
-#
-#   That directive makes podman download a helper "frontend" image from
-#   DOCKER HUB before it parses anything. GitHub's runners share IP addresses,
-#   so anonymous Docker Hub pulls are frequently throttled
-#   ("toomanyrequests: You have reached your pull rate limit") -> instant 125.
-#   It is also the ONLY thing in the whole build that does not come from
-#   ghcr.io. The Containerfile does not need it: podman understands every
-#   instruction we use (FROM scratch, COPY, RUN --mount=type=bind/cache/tmpfs)
-#   with its built-in parser.
-#
-# WHAT v3 DOES
-#   1. deletes that directive before building (no repo edit needed)
-#   2. prints a preflight (podman version, files found, free disk) so a
-#      failure is never invisible again
-#   3. pre-pulls the base image with 5 retries
-#   4. builds with the full output tee'd to build.log
-#   5. on failure, puts the REAL error in the run summary + uploads the log
+# v4 RULE: only flags that exist in BOTH podman 4.x and 5.x.
+#     podman pull          (no flags; retries done with a bash loop)
+#     podman build --pull=missing --build-arg -t -f <ctx>
+#     podman push, podman login, podman tag, podman image exists
+#   Logging is done with `tee`, never with --logfile.
 # ===========================================================================
 name: Build Razef OS image
 
@@ -69,9 +58,6 @@ jobs:
           podman system prune -af >/dev/null 2>&1 || true
           df -h /
 
-      # ---------------------------------------------------------------------
-      # FILE MODES: GitHub's web uploader strips the executable bit.
-      # ---------------------------------------------------------------------
       - name: Fix file modes
         run: |
           set -x
@@ -80,36 +66,41 @@ jobs:
           chmod +x razef-os/system_files/overrides/usr/bin/* 2>/dev/null || true
           ls -l razef-os/build_files/build.sh
 
-      # ---------------------------------------------------------------------
-      # PREFLIGHT: proves the files are where we think they are, and removes
-      # the Docker Hub dependency from line 1 of the Containerfile.
-      # ---------------------------------------------------------------------
       - name: Preflight
         run: |
           set -x
           podman --version
           df -h /
-          ls -la razef-os | head -20
-          test -f razef-os/Containerfile || { echo "::error title=Containerfile missing::razef-os/Containerfile not found in the checkout"; exit 1; }
-          test -d razef-os/build_files || { echo "::error title=build_files missing::razef-os/build_files not found"; exit 1; }
-          echo "--- Containerfile head (before) ---"; head -3 razef-os/Containerfile
-          # drop the BuildKit frontend directive: it pulls from Docker Hub,
-          # and Docker Hub throttles GitHub runners
+          test -f razef-os/Containerfile || { echo "::error title=Missing Containerfile::razef-os/Containerfile not found"; exit 1; }
+          test -d razef-os/build_files || { echo "::error title=Missing build_files::razef-os/build_files not found"; exit 1; }
+          # Remove the BuildKit frontend directive: it would make podman fetch a
+          # helper image from Docker Hub, which gets rate limited on runners.
+          # Not needed - podman's builtin parser handles this Containerfile.
           sed -i '/^# syntax=/d' razef-os/Containerfile
-          echo "--- Containerfile head (after) ---"; head -3 razef-os/Containerfile
-          grep -q 'syntax=' razef-os/Containerfile && { echo "::error::frontend directive still present"; exit 1; } || echo "OK: no Docker Hub dependency"
+          head -2 razef-os/Containerfile
 
-      # ---------------------------------------------------------------------
-      # Pull the base image separately so a pull problem cannot be mistaken
-      # for a build problem.
-      # ---------------------------------------------------------------------
       - name: Pull base image
         env:
           BASE: ${{ matrix.base }}
         run: |
           set -x
-          podman pull --retry 5 --retry-delay 10 "${BASE}"
-          podman images "${BASE}"
+          # `podman pull --retry` only exists in podman 5.x, so retry manually.
+          for attempt in 1 2 3; do
+            if podman pull "${BASE}"; then
+              echo "pulled ${BASE} (attempt ${attempt})"
+              break
+            fi
+            if [ "${attempt}" -eq 3 ]; then
+              echo "::error title=Pull failed::could not pull ${BASE} after 3 attempts"
+              exit 1
+            fi
+            echo "attempt ${attempt} failed - retrying in 20s"
+            sleep 20
+          done
+          podman image exists "${BASE}" || {
+            echo "::error title=Pull failed::${BASE} is not in local storage"
+            exit 1
+          }
 
       - name: Build image
         env:
@@ -125,9 +116,6 @@ jobs:
             --file razef-os/Containerfile \
             razef-os 2>&1 | tee "build-${IMAGE}.log"
 
-      # ---------------------------------------------------------------------
-      # Make any failure readable in one glance.
-      # ---------------------------------------------------------------------
       - name: Report failure
         if: failure()
         run: |
@@ -137,19 +125,17 @@ jobs:
             echo
             echo '```'
             if [ -f "$LOG" ]; then
-              grep -nE 'Error|error:|denied|No space|not found|cannot|unable|failed' "$LOG" | tail -n 15 || true
+              grep -nE 'Error|error:|denied|No space|not found|cannot|unable|failed|unknown flag' "$LOG" | tail -n 20 || true
               echo "----- last 25 lines -----"
               tail -n 25 "$LOG" || true
             else
-              echo "No build log was produced - podman refused to start."
-              echo "That means an argument, a missing path, or a pull of a"
-              echo "helper image was rejected before the build began."
+              echo "No build log: podman refused to start. Likely an unknown"
+              echo "flag for this podman version - see the step above."
             fi
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-
-          ERR="$(grep -hE 'Error|error:' "$LOG" 2>/dev/null | tail -n 2 | tr '\n' ' ' | cut -c1-600)"
-          echo "::error title=Build failed (${IMAGE:-${{ matrix.image }}})::${ERR:-no log produced}"
+          ERR="$(grep -hE 'Error|error:|unknown flag' "$LOG" 2>/dev/null | tail -n 2 | tr '\n' ' ' | cut -c1-600)"
+          echo "::error title=Build failed (${{ matrix.image }})::${ERR:-no log produced}"
 
       - name: Upload build log
         if: always()
@@ -160,7 +146,6 @@ jobs:
           if-no-files-found: ignore
           retention-days: 5
 
-      # ---------------------------------------------------------------------
       - name: Log in to GHCR
         if: success()
         run: |
