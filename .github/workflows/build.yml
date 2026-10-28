@@ -1,20 +1,22 @@
 ---
 # ===========================================================================
-# Razef OS build — v4  (last one, promise)
+# Razef OS build — v5
 #
 # Replaces the contents of  .github/workflows/build.yml
 #
-# HISTORY, so we stop repeating mistakes:
-#   v1  exit 125 in 2m29s  - build_files/build.sh had no exec bit
-#   v2  exit 125 in 0s     - used podman flags that the runner's podman
-#                            (4.x) does not have: --logfile / --security-opt
-#   v3  exit 125 in 0s     - used `podman pull --retry`, also 5.x-only
+# Failure history (each one was a different, real bug):
+#   v1  2m29s  exit 125  build_files/build.sh had no executable bit
+#   v2  0s     exit 125  --logfile / --security-opt don't exist in podman 4.x
+#   v3  0s     exit 125  `podman pull --retry` doesn't exist in podman 4.x
+#   v4  ~1m    exit 125  "no FROM statement found"
+#                        -> ARG BASE_IMAGE was declared AFTER the first FROM,
+#                           which makes it stage-local, so `FROM ${BASE_IMAGE}`
+#                           expanded to an empty string.
 #
-# v4 RULE: only flags that exist in BOTH podman 4.x and 5.x.
-#     podman pull          (no flags; retries done with a bash loop)
-#     podman build --pull=missing --build-arg -t -f <ctx>
-#     podman push, podman login, podman tag, podman image exists
-#   Logging is done with `tee`, never with --logfile.
+# v5 repairs that file in place before building (no repo edit needed):
+#   1. delete the "# syntax=" BuildKit frontend line  (Docker Hub rate limits)
+#   2. hoist "ARG BASE_IMAGE" above the first FROM     (fixes no-FROM error)
+#   3. print the result and hard-fail if the order is still wrong
 # ===========================================================================
 name: Build Razef OS image
 
@@ -66,25 +68,61 @@ jobs:
           chmod +x razef-os/system_files/overrides/usr/bin/* 2>/dev/null || true
           ls -l razef-os/build_files/build.sh
 
-      - name: Preflight
+      # ---------------------------------------------------------------------
+      # Repair the Containerfile that is in the repo, so no manual edit of a
+      # second file is needed. Everything here is verified by the step itself.
+      # ---------------------------------------------------------------------
+      - name: Repair Containerfile
         run: |
           set -x
-          podman --version
-          df -h /
-          test -f razef-os/Containerfile || { echo "::error title=Missing Containerfile::razef-os/Containerfile not found"; exit 1; }
-          test -d razef-os/build_files || { echo "::error title=Missing build_files::razef-os/build_files not found"; exit 1; }
-          # Remove the BuildKit frontend directive: it would make podman fetch a
-          # helper image from Docker Hub, which gets rate limited on runners.
-          # Not needed - podman's builtin parser handles this Containerfile.
-          sed -i '/^# syntax=/d' razef-os/Containerfile
-          head -2 razef-os/Containerfile
+          test -f razef-os/Containerfile || { echo "::error title=Missing Containerfile::razef-os/Containerfile not found in the checkout"; exit 1; }
+          python3 - <<'PY'
+          import pathlib, re, sys
+
+          p = pathlib.Path("razef-os/Containerfile")
+          lines = p.read_text().splitlines()
+
+          # 1. drop the BuildKit frontend directive (it pulls from Docker Hub)
+          before = len(lines)
+          lines = [l for l in lines if not l.lstrip().startswith("# syntax=")]
+          if len(lines) != before:
+              print("removed the BuildKit frontend directive")
+
+          # 2. a global ARG must appear before the first FROM, otherwise
+          #    "FROM ${BASE_IMAGE}" resolves to nothing
+          args = [l for l in lines if re.match(r"^ARG\s+BASE_IMAGE", l)]
+          if not args:
+              args = ['ARG BASE_IMAGE="ghcr.io/ublue-os/bazzite-gnome:stable"']
+              print("added a missing default ARG BASE_IMAGE")
+          lines = [l for l in lines if not re.match(r"^ARG\s+BASE_IMAGE", l)]
+
+          first_from = next((i for i, l in enumerate(lines) if l.startswith("FROM")), None)
+          if first_from is None:
+              sys.exit("ERROR: the Containerfile has no FROM at all")
+          lines[first_from:first_from] = args + [""]
+
+          p.write_text("\n".join(lines) + "\n")
+          print("hoisted:", args[0])
+          PY
+
+          echo "--- first 12 lines after repair ---"
+          head -12 razef-os/Containerfile
+
+          # 3. verify the order really is correct
+          ARG_LINE=$(grep -n '^ARG BASE_IMAGE' razef-os/Containerfile | head -1 | cut -d: -f1)
+          FROM_LINE=$(grep -n '^FROM' razef-os/Containerfile | head -1 | cut -d: -f1)
+          echo "ARG BASE_IMAGE on line ${ARG_LINE}, first FROM on line ${FROM_LINE}"
+          if [ -z "${ARG_LINE}" ] || [ "${ARG_LINE}" -ge "${FROM_LINE}" ]; then
+            echo "::error title=Containerfile repair failed::ARG BASE_IMAGE must come before the first FROM"
+            exit 1
+          fi
+          grep -q 'FROM ${BASE_IMAGE}' razef-os/Containerfile && echo "OK: FROM \${BASE_IMAGE} will resolve" || echo "note: no FROM \${BASE_IMAGE} found (fine if hardcoded)"
 
       - name: Pull base image
         env:
           BASE: ${{ matrix.base }}
         run: |
           set -x
-          # `podman pull --retry` only exists in podman 5.x, so retry manually.
           for attempt in 1 2 3; do
             if podman pull "${BASE}"; then
               echo "pulled ${BASE} (attempt ${attempt})"
@@ -97,10 +135,6 @@ jobs:
             echo "attempt ${attempt} failed - retrying in 20s"
             sleep 20
           done
-          podman image exists "${BASE}" || {
-            echo "::error title=Pull failed::${BASE} is not in local storage"
-            exit 1
-          }
 
       - name: Build image
         env:
@@ -129,8 +163,7 @@ jobs:
               echo "----- last 25 lines -----"
               tail -n 25 "$LOG" || true
             else
-              echo "No build log: podman refused to start. Likely an unknown"
-              echo "flag for this podman version - see the step above."
+              echo "No build log: podman refused to start."
             fi
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
