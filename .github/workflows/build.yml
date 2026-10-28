@@ -1,23 +1,28 @@
 ---
 # ===========================================================================
-# Razef OS build — v8
+# Razef OS build — v9
 # Replaces the contents of  .github/workflows/build.yml
 #
-# Failure history (each was a real, separate bug):
+# Failure history (every one was a real, separate bug):
 #   v1   2m29s  build_files/build.sh had no executable bit
 #   v2   0s     --logfile / --security-opt are podman 5.x only
 #   v3   0s     `podman pull --retry` is podman 5.x only
 #   v4   ~1m    ARG BASE_IMAGE declared after the first FROM
 #   v5   ~9m    Ollama moved from .tgz to .tar.zst (old URL 404)
-#   v6   ~12m   dracut: "ERROR: installing '/root'" (/root -> /var/root symlink)
-#   v7   ~40s   my "is build.sh outdated" guard false-fired on the legacy .tgz
-#               fallback line that the CURRENT script deliberately keeps
+#   v6   ~12m   dracut: "ERROR: installing '/root'" (/root -> /var/root)
+#   v7   ~40s   my "outdated build.sh" guard false-fired on the .tgz fallback
+#   v8   ~13m   dracut finished, but the splash theme was not in the initramfs:
+#               dracut only installs the plymouth theme reported by
+#               `plymouth-set-default-theme`, and only in hostonly mode, which
+#               a --no-hostonly (distributable) image never takes
 #
-# v8
-#   * guard rewritten as a positive check (.tar.zst must be present)
-#   * repair step now also moves /var/lib/ollama creation to tmpfiles.d,
-#     because build-time /var content fails `bootc container lint`
-#   * you do NOT need to upload any file - every fix is applied in the runner
+# v9
+#   * repair step now also writes /etc/dracut.conf.d/99-razef-plymouth.conf
+#     with install_items for the theme + the two-step plugin, and passes
+#     --no-hostonly to dracut (correct for a redistributable image)
+#   * verify step asserts all three patches really landed, so it fails in
+#     seconds instead of after a 13-minute build
+#   * you still do NOT need to upload any file
 # ===========================================================================
 name: Build Razef OS image
 
@@ -71,10 +76,6 @@ jobs:
           chmod +x razef-os/system_files/overrides/usr/bin/* 2>/dev/null || true
           ls -l razef-os/build_files/build.sh
 
-      # ---------------------------------------------------------------------
-      # Containerfile: drop the BuildKit frontend line (Docker Hub pull) and
-      # hoist ARG BASE_IMAGE above the first FROM.
-      # ---------------------------------------------------------------------
       - name: Repair Containerfile
         run: |
           set -x
@@ -90,18 +91,35 @@ jobs:
           if len(lines) != before:
               print("removed the BuildKit frontend directive")
 
+          # 1. ARG BASE_IMAGE must be declared before the first FROM
           args = [l for l in lines if re.match(r"^ARG\s+BASE_IMAGE", l)]
           if not args:
               args = ['ARG BASE_IMAGE="ghcr.io/ublue-os/bazzite-gnome:stable"']
-              print("added a missing default ARG BASE_IMAGE")
           lines = [l for l in lines if not re.match(r"^ARG\s+BASE_IMAGE", l)]
-
           first_from = next((i for i, l in enumerate(lines) if l.startswith("FROM")), None)
           if first_from is None:
               sys.exit("ERROR: the Containerfile has no FROM at all")
           lines[first_from:first_from] = args + [""]
-          p.write_text("\n".join(lines) + "\n")
           print("hoisted:", args[0])
+
+          # 2. the -nvidia image needs WITH_CUDA forwarded into build.sh, or it silently
+          #    builds the plain CPU image (build.sh gates the CUDA download on it).
+          if not any(re.match(r"^ARG\s+WITH_CUDA", l) for l in lines):
+              anchors = [i for i, l in enumerate(lines) if re.match(r"^ARG\s+", l)]
+              lines.insert(max(anchors) + 1, 'ARG WITH_CUDA="0"')
+              print("added ARG WITH_CUDA")
+          if not any('WITH_CUDA="${WITH_CUDA}"' in l for l in lines):
+              anchors = [i for i, l in enumerate(lines) if l.strip().startswith("WITH_DEV_TOOLS=")]
+              lines.insert(max(anchors) + 1, '    WITH_CUDA="${WITH_CUDA}" \\')
+              print("forwarded WITH_CUDA into the build script")
+
+          # 3. invoke the script through bash so a lost exec bit cannot break the build
+          for i, l in enumerate(lines):
+              if l.strip() == "/ctx/build_files/build.sh":
+                  lines[i] = "    bash /ctx/build_files/build.sh"
+                  print("build.sh is now executed via bash")
+
+          p.write_text("\n".join(lines) + "\n")
           PY
 
           ARG_LINE=$(grep -n '^ARG BASE_IMAGE' razef-os/Containerfile | head -1 | cut -d: -f1)
@@ -109,11 +127,14 @@ jobs:
           echo "ARG BASE_IMAGE on line ${ARG_LINE}, first FROM on line ${FROM_LINE}"
           [ -n "${ARG_LINE}" ] && [ "${ARG_LINE}" -lt "${FROM_LINE}" ] || {
             echo "::error title=Containerfile repair failed::ARG BASE_IMAGE must come before the first FROM"; exit 1; }
+          grep -q '^ARG WITH_CUDA=' razef-os/Containerfile || { echo "::error title=Containerfile repair failed::ARG WITH_CUDA missing"; exit 1; }
+          grep -q 'WITH_CUDA="\${WITH_CUDA}"' razef-os/Containerfile || { echo "::error title=Containerfile repair failed::WITH_CUDA is not forwarded"; exit 1; }
+          grep -q 'bash /ctx/build_files/build.sh' razef-os/Containerfile || { echo "::error title=Containerfile repair failed::build.sh is not run via bash"; exit 1; }
+          echo "Containerfile repaired"
 
       # ---------------------------------------------------------------------
-      # build.sh: two in-place repairs so no manual re-upload is needed.
-      #   (a) create the /root symlink target that dracut needs
-      #   (b) stop creating /var/lib/ollama at build time -> tmpfiles.d
+      # Three in-place repairs to build.sh. Each is idempotent and reports
+      # what it did, so the log always shows the current state.
       # ---------------------------------------------------------------------
       - name: Repair build.sh
         run: |
@@ -128,24 +149,65 @@ jobs:
           s = p.read_text()
           changed = False
 
-          # (a) dracut needs the /root symlink target to exist
+          # (a) plymouth theme must be forced into the initramfs
+          if "plymouth-set-default-theme razef" in s:
+              print("plymouth install_items: already present")
+          else:
+              anchor = "    # Atomic images symlink /root -> /var/root."
+              if anchor not in s:
+                  anchor = "    DRACUT_NO_XATTR=1 dracut"
+              if anchor not in s:
+                  sys.exit("ERROR: could not find the dracut section in build.sh")
+              block = "\n".join([
+                  "    # --- force the splash theme into the initramfs ---------------------",
+                  "    # dracut's plymouth module installs the theme reported by",
+                  "    # plymouth-set-default-theme, and only in hostonly mode. A",
+                  "    # redistributable image is built --no-hostonly, so that never runs.",
+                  "    if command -v plymouth-set-default-theme >/dev/null 2>&1; then",
+                  "        plymouth-set-default-theme razef >/dev/null 2>&1 || true",
+                  "    fi",
+                  "    if [ -f /usr/share/plymouth/plymouthd.defaults ]; then",
+                  "        sed -i 's/^Theme=.*/Theme=razef/' /usr/share/plymouth/plymouthd.defaults",
+                  "    fi",
+                  "    install -d /etc/plymouth",
+                  "    printf '[Daemon]\\nTheme=razef\\nShowDelay=0\\nDeviceTimeout=8\\n' > /etc/plymouth/plymouthd.conf",
+                  '    theme_items="/etc/plymouth/plymouthd.conf"',
+                  '    for f in /usr/share/plymouth/themes/razef/*; do',
+                  '        if [ -f "${f}" ]; then',
+                  '            theme_items="${theme_items} ${f}"',
+                  "        fi",
+                  "    done",
+                  "    for plug in /usr/lib64/plymouth/two-step.so /usr/lib/plymouth/two-step.so; do",
+                  '        if [ -e "${plug}" ]; then',
+                  '            theme_items="${theme_items} ${plug}"',
+                  "        fi",
+                  "    done",
+                  '    printf \'install_items+=" %s "\\n\' "${theme_items}" > /etc/dracut.conf.d/99-razef-plymouth.conf',
+                  '    echo "dracut install_items: $(cat /etc/dracut.conf.d/99-razef-plymouth.conf)"',
+                  "",
+              ])
+              s = s.replace(anchor, block + anchor, 1)
+              changed = True
+              print("plymouth install_items: inserted")
+
+          # (b) dracut needs the /root symlink target
           if "realpath /root" in s:
               print("dracut /root fix: already present")
           else:
               anchor = "    DRACUT_NO_XATTR=1 dracut"
               if anchor not in s:
                   sys.exit("ERROR: could not find the dracut call in build.sh")
-              fix = "".join([
-                  "    # Atomic images symlink /root -> /var/root; dracut-install fails\n",
-                  "    # with \"ERROR: installing /root\" when that target is missing.\n",
-                  "    install -d \"$(realpath /root 2>/dev/null || echo /var/root)\"\n",
-                  "\n",
+              fix = "\n".join([
+                  "    # Atomic images symlink /root -> /var/root; dracut-install fails",
+                  '    # with "ERROR: installing /root" when that target is missing.',
+                  '    install -d "$(realpath /root 2>/dev/null || echo /var/root)"',
+                  "",
               ])
               s = s.replace(anchor, fix + anchor, 1)
               changed = True
               print("dracut /root fix: inserted")
 
-          # (b) no build-time content under /var (bootc container lint rejects it)
+          # (c) no build-time content under /var (bootc container lint rejects it)
           vardir = "    install -d -o ollama -g ollama -m 0755 /var/lib/ollama /var/lib/ollama/models"
           if vardir in s:
               s = s.replace(
@@ -158,6 +220,18 @@ jobs:
               print("var/lib/ollama: moved to tmpfiles.d")
           else:
               print("var/lib/ollama: nothing to change")
+
+          # (d) a shippable image wants a generic initramfs
+          if "        --no-hostonly \\" in s:
+              print("dracut --no-hostonly: already present")
+          else:
+              old = "        --reproducible \\\n"
+              if old in s:
+                  s = s.replace(old, old + "        --no-hostonly \\\n", 1)
+                  changed = True
+                  print("dracut --no-hostonly: inserted")
+              else:
+                  print("dracut --no-hostonly: could not locate the --reproducible flag")
 
           if changed:
               p.write_text(s)
@@ -177,18 +251,29 @@ jobs:
           fi
 
           bash -n razef-os/build_files/build.sh
-          grep -n -B1 'DRACUT_NO_XATTR' razef-os/build_files/build.sh | head -6
-          cat "${TMPF}"
 
-      - name: Verify build.sh is up to date
+      # ---------------------------------------------------------------------
+      # Every patch must be present before we spend 15 minutes building.
+      # ---------------------------------------------------------------------
+      - name: Verify patches applied
         run: |
           set -x
-          if grep -q 'tar.zst' razef-os/build_files/build.sh; then
-            echo "OK: build.sh uses the current .tar.zst artifacts"
+          FAIL=0
+          need() { if grep -q -e "$1" razef-os/build_files/build.sh; then echo "OK   $2"; else echo "::error title=Patch missing::$2"; FAIL=1; fi; }
+          need 'tar.zst'                         "build.sh downloads the current Ollama artifacts"
+          need 'plymouth-set-default-theme razef' "splash theme forced into the initramfs"
+          need '99-razef-plymouth.conf'          "dracut install_items written"
+          need 'realpath /root'                  "dracut /root symlink fix"
+          need '^ *--no-hostonly'             "generic initramfs (flag, not comment)"
+          if grep -q 'install -d -o ollama' razef-os/build_files/build.sh; then
+            echo "::error title=Patch missing::build-time /var creation still present"
+            FAIL=1
           else
-            echo "::error title=build_files/build.sh is outdated::No .tar.zst download found - replace razef-os/build_files/build.sh with the version from the current Razef zip, then re-run."
-            exit 1
+            echo "OK   no build-time /var content"
           fi
+          echo "--- the dracut invocation ---"
+          grep -n -A6 'dracut \\\\' razef-os/build_files/build.sh | head -20
+          exit ${FAIL}
 
       - name: Pull base image
         env:
