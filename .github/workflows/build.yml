@@ -1,16 +1,21 @@
 ---
-# ---------------------------------------------------------------------------
-# MINIMAL build workflow for a repo where the Razef files ended up nested
-# inside a "razef-os/" folder instead of at the repository root.
+# ===========================================================================
+# Razef OS build — v2
 #
-# File to create on GitHub (the leading dot is typed, not something you drag):
+# Replaces the contents of  .github/workflows/build.yml  in your repo.
 #
-#     .github/workflows/build.yml
+# What changed vs v1 (which failed in 2 min with exit code 125):
+#   * fixes the missing executable bit on build_files/build.sh, which the
+#     GitHub web uploader strips  (this is what killed the build)
+#   * frees ~30 GB of runner disk instead of ~10 GB (the Bazzite base image
+#     needs a lot of room)
+#   * captures the full build log and, if it fails, prints the real error as
+#     an annotation so it can be read at a glance
+#   * uploads build.log as an artifact on failure
 #
-# Paste this whole file into it, commit, and the build starts by itself.
-# It builds straight from razef-os/Containerfile using razef-os/ as context,
-# so the existing structure works untouched.
-# ---------------------------------------------------------------------------
+# Layout assumed: the Razef files live in a folder called  razef-os/  at the
+# repository root (which is how your repo is organised right now).
+# ===========================================================================
 name: Build Razef OS image
 
 on:
@@ -42,33 +47,87 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # The runners start with ~14 GB free. A Bazzite base image needs more.
+      # ---------------------------------------------------------------------
+      # The runner starts with a big toolchain we don't need. Free it, then
+      # show how much room we actually have.
+      # ---------------------------------------------------------------------
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
-          sudo podman system prune -af || true
-          df -h /
+          set -euxo pipefail
+          echo "=== before ==="; df -h /
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc /opt/hostedtoolcache \
+            /usr/local/.ghcup \
+            /usr/share/swift \
+            /opt/az /opt/pipx /opt/google \
+            /usr/local/share/boost \
+            /usr/lib/jvm 2>/dev/null || true
+          sudo podman system prune -af --volumes 2>/dev/null || true
+          sudo swapoff -a 2>/dev/null || true
+          echo "=== after ==="; df -h /
+
+      # ---------------------------------------------------------------------
+      # GitHub's web UI throws away file permissions. Without this the build
+      # dies with "Permission denied" (podman exit code 125).
+      # ---------------------------------------------------------------------
+      - name: Fix file modes stripped by the GitHub uploader
+        run: |
+          set -x
+          chmod +x razef-os/build_files/build.sh || true
+          chmod +x razef-os/scripts/*.sh 2>/dev/null || true
+          chmod +x razef-os/system_files/overrides/usr/bin/* 2>/dev/null || true
+          ls -l razef-os/build_files/build.sh razef-os/system_files/overrides/usr/bin/
 
       - name: Build image
         env:
           IMAGE: ${{ matrix.image }}
           BASE: ${{ matrix.base }}
         run: |
-          set -euo pipefail
           echo "Building ${IMAGE} from ${BASE}"
           podman build \
             --pull=newer \
+            --logfile "${GITHUB_WORKSPACE}/build-${IMAGE}.log" \
+            --security-opt label=disable \
             --build-arg BASE_IMAGE="${BASE}" \
             --tag "localhost/${IMAGE}:stable" \
             --file razef-os/Containerfile \
             razef-os
 
+      # If the build failed, surface the actual reason as an annotation.
+      - name: Show build error
+        if: failure()
+        run: |
+          LOG="${GITHUB_WORKSPACE}/build-${{ matrix.image }}.log"
+          if [ -f "$LOG" ]; then
+            echo "=== last 40 lines of the build log ==="
+            tail -n 40 "$LOG" || true
+            ERROR="$(grep -iE 'error:|permission denied|no space left|not found|cannot' "$LOG" | tail -n 3 | tr '\n' ' ' | cut -c1-800)"
+            echo "::error title=Build failed::${ERROR:-see the log artifact below}"
+          else
+            echo "::error title=Build failed::podman produced no log file"
+          fi
+          df -h / || true
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ matrix.image }}
+          path: build-${{ matrix.image }}.log
+          if-no-files-found: ignore
+          retention-days: 5
+
+      # ---------------------------------------------------------------------
       - name: Log in to GHCR
+        if: success()
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" |
             podman login ghcr.io -u "${{ github.actor }}" --password-stdin
 
       - name: Push image
+        if: success()
         env:
           IMAGE: ${{ matrix.image }}
         run: |
@@ -78,3 +137,4 @@ jobs:
           podman tag "localhost/${IMAGE}:stable" "${TARGET}"
           podman push "${TARGET}"
           echo "✅ pushed ${TARGET}"
+          echo "### ✅ \`${TARGET}\`" >> "$GITHUB_STEP_SUMMARY"
