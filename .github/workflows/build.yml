@@ -1,6 +1,6 @@
 ---
 # ===========================================================================
-# Razef OS build — v6
+# Razef OS build — v7
 #
 # Replaces the contents of  .github/workflows/build.yml
 #
@@ -10,6 +10,15 @@
 #   v3  0s     `podman pull --retry` doesn't exist in podman 4.x
 #   v4  ~1m    ARG BASE_IMAGE was declared after the first FROM
 #   v5  ~9m    Ollama download 404: upstream moved from .tgz to .tar.zst
+#   v6  ~12m   dracut: "ERROR: installing '/root'" -> /root is a symlink to
+#              /var/root and the target did not exist in the build container
+#              (the initramfs assertion caught it, which is what it is for)
+#
+# v7 changes
+#   * patches build_files/build.sh in the runner: creates the /root symlink
+#     target before dracut runs. You do NOT need to re-upload build.sh.
+#   * keeps every earlier repair (Containerfile ARG hoist, mode fixes, .tar.zst
+#     check)
 #
 # v6 changes
 #   * builds the image with the CURRENT Ollama artifact names (handled inside
@@ -109,6 +118,39 @@ jobs:
           echo "ARG BASE_IMAGE on line ${ARG_LINE}, first FROM on line ${FROM_LINE}"
           [ -n "${ARG_LINE}" ] && [ "${ARG_LINE}" -lt "${FROM_LINE}" ] || {
             echo "::error title=Containerfile repair failed::ARG BASE_IMAGE must come before the first FROM"; exit 1; }
+
+      # ---------------------------------------------------------------------
+      # Patch build.sh: Atomic images symlink /root -> /var/root and dracut
+      # aborts with "ERROR: installing '/root'" when that target is missing.
+      # ---------------------------------------------------------------------
+      - name: Repair build.sh
+        run: |
+          set -x
+          python3 - <<'PY'
+          import pathlib, sys
+
+          p = pathlib.Path("razef-os/build_files/build.sh")
+          if not p.exists():
+              sys.exit("ERROR: razef-os/build_files/build.sh not found")
+
+          s = p.read_text()
+          if "realpath /root" in s:
+              print("build.sh already fixed - nothing to do")
+          else:
+              anchor = "    DRACUT_NO_XATTR=1 dracut \\"
+              if anchor not in s:
+                  sys.exit("ERROR: could not find the dracut call in build.sh")
+              fix = (
+                  '    # Atomic images symlink /root -> /var/root; dracut-install fails with\n'
+                  '    # "ERROR: installing \'/root\'" when that target does not exist.\n'
+                  '    install -d "$(realpath /root 2>/dev/null || echo /var/root)"\n\n'
+              )
+              s = s.replace(anchor, fix + anchor, 1)
+              p.write_text(s)
+              print("inserted the /root fix before the dracut call")
+          PY
+          bash -n razef-os/build_files/build.sh
+          grep -n -B1 'DRACUT_NO_XATTR' razef-os/build_files/build.sh | head -6
 
       # ---------------------------------------------------------------------
       # Guard against a stale build_files/build.sh (the file that downloads
