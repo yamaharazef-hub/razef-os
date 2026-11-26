@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=JARVIS Setup
+Comment=Re-run the JARVIS first-run setup
+Exec=/usr/bin/jarvis-firstboot --force
+Icon=jarvis-os
+Terminal=false
+Categories=Settings;System;
+Keywords=setup;firstboot;wizard;
+NoDisplay=false

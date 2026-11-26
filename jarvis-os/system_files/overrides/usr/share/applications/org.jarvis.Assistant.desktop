@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=JARVIS Assistant
+GenericName=Local AI Assistant
+Comment=Offline AI assistant with voice control that can diagnose and control this machine
+Exec=/usr/bin/jarvis-assist
+Icon=jarvis-assist
+Terminal=false
+Categories=Utility;System;
+Keywords=ai;assistant;chat;voice;jarvis;ollama;help;diagnose;
+StartupNotify=true
+StartupWMClass=jarvis-assist

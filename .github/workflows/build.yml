@@ -1,6 +1,6 @@
 ---
 # ===========================================================================
-# Razef OS build — v11
+# JARVIS OS build — v11
 # Replaces the contents of  .github/workflows/build.yml
 #
 # Failure history (every one was a real, separate bug):
@@ -29,13 +29,13 @@
 #     build-time /var, --no-hostonly, WITH_CUDA forwarding, bash invocation)
 #
 # v11
-#   * third image: razef-os-ally, built on bazzite-deck-gnome so handhelds
+#   * third image: jarvis-os-ally, built on bazzite-deck-gnome so handhelds
 #     (ROG Ally X and friends) keep Steam Gaming Mode + the handheld stack
 #   * splash check no longer false-negatives on `lsinitrd | grep -q` under
 #     set -o pipefail (grep exits early -> SIGPIPE -> pipeline returns 141)
 #   * you still do NOT need to upload any file
 # ===========================================================================
-name: Build Razef OS image
+name: Build JARVIS OS image
 
 on:
   push:
@@ -57,17 +57,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - image: razef-os
+          - image: jarvis-os
             base: ghcr.io/ublue-os/bazzite-gnome:stable
             cuda: 0
-          - image: razef-os-nvidia
+          - image: jarvis-os-nvidia
             base: ghcr.io/ublue-os/bazzite-gnome-nvidia-open:stable
             cuda: 1
           # Handhelds (ROG Ally / Ally X, Legion Go, Steam Deck, ...).
           # bazzite-deck-gnome = Steam Gaming Mode + GNOME desktop mode +
           # the handheld stack (InputPlumber / OpenGamepadUI, TDP in Steam).
           # Building on the plain desktop image would strip all of that.
-          - image: razef-os-ally
+          - image: jarvis-os-ally
             base: ghcr.io/ublue-os/bazzite-deck-gnome:stable
             cuda: 0
 
@@ -89,19 +89,19 @@ jobs:
       - name: Fix file modes
         run: |
           set -x
-          chmod +x razef-os/build_files/build.sh || true
-          chmod +x razef-os/scripts/*.sh 2>/dev/null || true
-          chmod +x razef-os/system_files/overrides/usr/bin/* 2>/dev/null || true
-          ls -l razef-os/build_files/build.sh
+          chmod +x jarvis-os/build_files/build.sh || true
+          chmod +x jarvis-os/scripts/*.sh 2>/dev/null || true
+          chmod +x jarvis-os/system_files/overrides/usr/bin/* 2>/dev/null || true
+          ls -l jarvis-os/build_files/build.sh
 
       - name: Repair Containerfile
         run: |
           set -x
-          test -f razef-os/Containerfile || { echo "::error title=Missing Containerfile::razef-os/Containerfile not found"; exit 1; }
+          test -f jarvis-os/Containerfile || { echo "::error title=Missing Containerfile::jarvis-os/Containerfile not found"; exit 1; }
           python3 - <<'PY'
           import pathlib, re, sys
 
-          p = pathlib.Path("razef-os/Containerfile")
+          p = pathlib.Path("jarvis-os/Containerfile")
           lines = p.read_text().splitlines()
 
           before = len(lines)
@@ -140,14 +140,14 @@ jobs:
           p.write_text("\n".join(lines) + "\n")
           PY
 
-          ARG_LINE=$(grep -n '^ARG BASE_IMAGE' razef-os/Containerfile | head -1 | cut -d: -f1)
-          FROM_LINE=$(grep -n '^FROM' razef-os/Containerfile | head -1 | cut -d: -f1)
+          ARG_LINE=$(grep -n '^ARG BASE_IMAGE' jarvis-os/Containerfile | head -1 | cut -d: -f1)
+          FROM_LINE=$(grep -n '^FROM' jarvis-os/Containerfile | head -1 | cut -d: -f1)
           echo "ARG BASE_IMAGE on line ${ARG_LINE}, first FROM on line ${FROM_LINE}"
           [ -n "${ARG_LINE}" ] && [ "${ARG_LINE}" -lt "${FROM_LINE}" ] || {
             echo "::error title=Containerfile repair failed::ARG BASE_IMAGE must come before the first FROM"; exit 1; }
-          grep -q '^ARG WITH_CUDA=' razef-os/Containerfile || { echo "::error title=Containerfile repair failed::ARG WITH_CUDA missing"; exit 1; }
-          grep -q 'WITH_CUDA="\${WITH_CUDA}"' razef-os/Containerfile || { echo "::error title=Containerfile repair failed::WITH_CUDA is not forwarded"; exit 1; }
-          grep -q 'bash /ctx/build_files/build.sh' razef-os/Containerfile || { echo "::error title=Containerfile repair failed::build.sh is not run via bash"; exit 1; }
+          grep -q '^ARG WITH_CUDA=' jarvis-os/Containerfile || { echo "::error title=Containerfile repair failed::ARG WITH_CUDA missing"; exit 1; }
+          grep -q 'WITH_CUDA="\${WITH_CUDA}"' jarvis-os/Containerfile || { echo "::error title=Containerfile repair failed::WITH_CUDA is not forwarded"; exit 1; }
+          grep -q 'bash /ctx/build_files/build.sh' jarvis-os/Containerfile || { echo "::error title=Containerfile repair failed::build.sh is not run via bash"; exit 1; }
           echo "Containerfile repaired"
 
       # ---------------------------------------------------------------------
@@ -160,15 +160,15 @@ jobs:
           python3 - <<'PY'
           import pathlib, sys
 
-          p = pathlib.Path("razef-os/build_files/build.sh")
+          p = pathlib.Path("jarvis-os/build_files/build.sh")
           if not p.exists():
-              sys.exit("ERROR: razef-os/build_files/build.sh not found")
+              sys.exit("ERROR: jarvis-os/build_files/build.sh not found")
 
           s = p.read_text()
           changed = False
 
           # (a) plymouth theme must be forced into the initramfs
-          if "plymouth-set-default-theme razef" in s:
+          if "plymouth-set-default-theme jarvis" in s:
               print("plymouth install_items: already present")
           else:
               anchor = "    # Atomic images symlink /root -> /var/root."
@@ -182,15 +182,15 @@ jobs:
                   "    # plymouth-set-default-theme, and only in hostonly mode. A",
                   "    # redistributable image is built --no-hostonly, so that never runs.",
                   "    if command -v plymouth-set-default-theme >/dev/null 2>&1; then",
-                  "        plymouth-set-default-theme razef >/dev/null 2>&1 || true",
+                  "        plymouth-set-default-theme jarvis >/dev/null 2>&1 || true",
                   "    fi",
                   "    if [ -f /usr/share/plymouth/plymouthd.defaults ]; then",
-                  "        sed -i 's/^Theme=.*/Theme=razef/' /usr/share/plymouth/plymouthd.defaults",
+                  "        sed -i 's/^Theme=.*/Theme=jarvis/' /usr/share/plymouth/plymouthd.defaults",
                   "    fi",
                   "    install -d /etc/plymouth",
-                  "    printf '[Daemon]\\nTheme=razef\\nShowDelay=0\\nDeviceTimeout=8\\n' > /etc/plymouth/plymouthd.conf",
+                  "    printf '[Daemon]\\nTheme=jarvis\\nShowDelay=0\\nDeviceTimeout=8\\n' > /etc/plymouth/plymouthd.conf",
                   '    theme_items="/etc/plymouth/plymouthd.conf"',
-                  '    for f in /usr/share/plymouth/themes/razef/*; do',
+                  '    for f in /usr/share/plymouth/themes/jarvis/*; do',
                   '        if [ -f "${f}" ]; then',
                   '            theme_items="${theme_items} ${f}"',
                   "        fi",
@@ -200,8 +200,8 @@ jobs:
                   '            theme_items="${theme_items} ${plug}"',
                   "        fi",
                   "    done",
-                  '    printf \'install_items+=" %s "\\n\' "${theme_items}" > /etc/dracut.conf.d/99-razef-plymouth.conf',
-                  '    echo "dracut install_items: $(cat /etc/dracut.conf.d/99-razef-plymouth.conf)"',
+                  '    printf \'install_items+=" %s "\\n\' "${theme_items}" > /etc/dracut.conf.d/99-jarvis-plymouth.conf',
+                  '    echo "dracut install_items: $(cat /etc/dracut.conf.d/99-jarvis-plymouth.conf)"',
                   "",
               ])
               s = s.replace(anchor, block + anchor, 1)
@@ -271,11 +271,11 @@ jobs:
           # (g) `lsinitrd | grep -q` is a false negative under `set -o pipefail`:
           #     grep -q exits at the first match, lsinitrd dies of SIGPIPE and the
           #     pipeline reports 141, so a theme that IS present reads as missing.
-          pipe_check = '        if lsinitrd "${INITRAMFS}" | grep -q \'plymouth/themes/razef\'; then'
+          pipe_check = '        if lsinitrd "${INITRAMFS}" | grep -q \'plymouth/themes/jarvis\'; then'
           if pipe_check in s:
               fixed = "\n".join([
                   '        INITRD_LIST="$(lsinitrd "${INITRAMFS}" 2>/dev/null || true)"',
-                  '        if [[ "${INITRD_LIST}" == *plymouth/themes/razef* ]]; then',
+                  '        if [[ "${INITRD_LIST}" == *plymouth/themes/jarvis* ]]; then',
               ])
               s = s.replace(pipe_check, fixed, 1)
               changed = True
@@ -291,13 +291,13 @@ jobs:
               lines = s.split("\n")
               try:
                   i = next(k for k, l in enumerate(lines)
-                           if l.strip() == 'echo "ERROR: razef plymouth theme is NOT in the initramfs."')
+                           if l.strip() == 'echo "ERROR: jarvis plymouth theme is NOT in the initramfs."')
               except StopIteration:
                   i = None
               if i is None:
                   print("splash gate: message not found, leaving as is")
               else:
-                  lines[i] = '            echo "WARNING: razef plymouth theme is NOT in the initramfs."'
+                  lines[i] = '            echo "WARNING: jarvis plymouth theme is NOT in the initramfs."'
                   try:
                       j = next(k for k in range(i, min(i + 12, len(lines)))
                                if lines[k].strip() == "exit 1")
@@ -305,11 +305,11 @@ jobs:
                       j = None
                   diag = [
                       '            echo "         the first seconds of boot fall back to the default splash"',
-                      '            echo "::warning title=Splash fallback::razef theme missing from the initramfs"',
+                      '            echo "::warning title=Splash fallback::jarvis theme missing from the initramfs"',
                       '            echo "--- dracut diagnostics ---"',
                       '            dracut --version 2>&1 | head -1 || true',
                       '            ls -l /etc/dracut.conf.d/ 2>&1 | head -5 || true',
-                      '            cat /etc/dracut.conf.d/99-razef-plymouth.conf 2>&1 || true',
+                      '            cat /etc/dracut.conf.d/99-jarvis-plymouth.conf 2>&1 || true',
                       '            echo "initramfs entries: $(lsinitrd "${INITRAMFS}" 2>/dev/null | wc -l)"',
                       '            lsinitrd "${INITRAMFS}" 2>/dev/null | grep -i plymouth | head -20 || true',
                   ]
@@ -322,11 +322,11 @@ jobs:
               p.write_text(s)
           PY
 
-          mkdir -p razef-os/system_files/overrides/usr/lib/tmpfiles.d
-          TMPF=razef-os/system_files/overrides/usr/lib/tmpfiles.d/razef-ollama.conf
+          mkdir -p jarvis-os/system_files/overrides/usr/lib/tmpfiles.d
+          TMPF=jarvis-os/system_files/overrides/usr/lib/tmpfiles.d/jarvis-ollama.conf
           if [ ! -f "${TMPF}" ]; then
             printf '%s\n' \
-              '# Razef Assistant: AI models live on the writable /var so they survive' \
+              '# JARVIS Assistant: AI models live on the writable /var so they survive' \
               '# image updates. Created at boot, not baked into the image.' \
               'd /var/lib/ollama         0755 ollama ollama -' \
               'd /var/lib/ollama/models  0755 ollama ollama -' > "${TMPF}"
@@ -335,7 +335,7 @@ jobs:
             echo "${TMPF} already present"
           fi
 
-          bash -n razef-os/build_files/build.sh
+          bash -n jarvis-os/build_files/build.sh
 
       # ---------------------------------------------------------------------
       # Every patch must be present before we spend 15 minutes building.
@@ -344,30 +344,30 @@ jobs:
         run: |
           set -x
           FAIL=0
-          need() { if grep -q -e "$1" razef-os/build_files/build.sh; then echo "OK   $2"; else echo "::error title=Patch missing::$2"; FAIL=1; fi; }
+          need() { if grep -q -e "$1" jarvis-os/build_files/build.sh; then echo "OK   $2"; else echo "::error title=Patch missing::$2"; FAIL=1; fi; }
           need 'tar.zst'                         "build.sh downloads the current Ollama artifacts"
-          need 'plymouth-set-default-theme razef' "splash theme forced into the initramfs"
-          need '99-razef-plymouth.conf'          "dracut install_items written"
+          need 'plymouth-set-default-theme jarvis' "splash theme forced into the initramfs"
+          need '99-jarvis-plymouth.conf'          "dracut install_items written"
           need 'realpath /root'                  "dracut /root symlink fix"
           need '^ *--no-hostonly'             "generic initramfs (flag, not comment)"
-          if grep -q 'install -d -o ollama' razef-os/build_files/build.sh; then
+          if grep -q 'install -d -o ollama' jarvis-os/build_files/build.sh; then
             echo "::error title=Patch missing::build-time /var creation still present"
             FAIL=1
           else
             echo "OK   no build-time /var content"
           fi
-          if grep -qF -- '--install "${theme_items}"' razef-os/build_files/build.sh; then
+          if grep -qF -- '--install "${theme_items}"' jarvis-os/build_files/build.sh; then
             echo "OK   splash items handed to dracut on the command line"
           else
             echo "::error title=Patch missing::dracut --install"; FAIL=1
           fi
-          if grep -qF '::warning title=Splash fallback::' razef-os/build_files/build.sh; then
+          if grep -qF '::warning title=Splash fallback::' jarvis-os/build_files/build.sh; then
             echo "OK   missing splash warns instead of failing the build"
           else
             echo "::error title=Patch missing::splash gate downgrade"; FAIL=1
           fi
           echo "--- the dracut invocation ---"
-          grep -n -A10 -- 'dracut' razef-os/build_files/build.sh | grep -A10 'DRACUT_NO_XATTR' | head -14
+          grep -n -A10 -- 'dracut' jarvis-os/build_files/build.sh | grep -A10 'DRACUT_NO_XATTR' | head -14
           exit ${FAIL}
 
       - name: Pull base image
@@ -400,8 +400,8 @@ jobs:
             --build-arg BASE_IMAGE="${BASE}" \
             --build-arg WITH_CUDA="${CUDA}" \
             --tag "localhost/${IMAGE}:stable" \
-            --file razef-os/Containerfile \
-            razef-os 2>&1 | tee "build-${IMAGE}.log"
+            --file jarvis-os/Containerfile \
+            jarvis-os 2>&1 | tee "build-${IMAGE}.log"
 
       - name: Report failure
         if: failure()
