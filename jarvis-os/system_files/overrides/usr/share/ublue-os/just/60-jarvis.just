@@ -32,6 +32,12 @@ jarvis-ai-status:
     set -euo pipefail
     systemctl status ollama.service --no-pager --lines=0 2>/dev/null || echo "ollama.service: not running"
     echo
+    if curl -sf http://127.0.0.1:11434/api/version >/dev/null 2>&1; then
+        echo "Ollama API: responding on 127.0.0.1:11434"
+    else
+        echo "Ollama API: NOT responding (service may be active but not serving)"
+    fi
+    echo
     echo "Installed models:"
     ollama list 2>/dev/null || echo "  (none yet - run 'ujust jarvis-ai-models')"
     echo
@@ -57,6 +63,17 @@ jarvis-ai-models:
         echo
         echo "Pulling ${model} ... this can take a few minutes."
         sudo systemctl enable --now ollama.service
+        if ! curl -sf http://127.0.0.1:11434/api/version >/dev/null 2>&1; then
+            echo "Ollama is not answering. Restarting it once..."
+            sudo systemctl restart ollama.service || true
+            sleep 3
+        fi
+        if ! curl -sf http://127.0.0.1:11434/api/version >/dev/null 2>&1; then
+            echo
+            echo "ERROR: ollama.service is not serving on 127.0.0.1:11434."
+            echo "Check: journalctl -u ollama -b -n 40 --no-pager"
+            exit 1
+        fi
         ollama pull "${model}"
         mkdir -p "$HOME/.config/jarvis"
         printf '%s\n' "${model}" >"$HOME/.config/jarvis/default-model"

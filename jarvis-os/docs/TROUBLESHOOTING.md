@@ -66,11 +66,40 @@ journalctl --user -u jarvis-assist -f
 | Symptom | Fix |
 |---|---|
 | “engine offline” | `sudo systemctl enable --now ollama` |
+| Service says `active` but the API does not answer | see [Ollama is active but not serving](#ollama-is-active-but-not-serving) |
 | “backend not reachable” | `systemctl --user restart jarvis-assist` |
 | “no model installed” | `ujust jarvis-ai-models` |
 | Model downloaded but not listed | `ollama list`; the UI refreshes every 20 s |
 | Very slow answers | use a smaller model, e.g. `qwen3:1.7b` |
 | Window does not open | `jarvis-assist` from a terminal to see the error |
+
+---
+
+### Ollama is active but not serving
+
+`systemctl is-active ollama` can say `active` while
+`curl http://127.0.0.1:11434/api/version` returns nothing. Check the real cause:
+
+```bash
+systemctl status ollama --no-pager
+journalctl -u ollama -b -n 40 --no-pager
+ss -ltnp | grep 11434 || true
+```
+
+Emergency start as your own user (do not write logs under root-owned
+`/var/lib/jarvis`):
+
+```bash
+sudo systemctl stop ollama.service
+mkdir -p ~/.local/state/jarvis
+OLLAMA_HOST=127.0.0.1:11434 OLLAMA_MODELS="$HOME/.local/share/ollama/models" \
+  nohup /usr/local/bin/ollama serve >"$HOME/.local/state/jarvis/ollama.log" 2>&1 &
+sleep 5
+cat "$HOME/.local/state/jarvis/ollama.log"
+curl -s http://127.0.0.1:11434/api/version
+```
+
+Once the `curl` returns JSON, run `ollama pull qwen3:4b` and reopen JARVIS.
 
 ---
 
