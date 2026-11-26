@@ -115,7 +115,7 @@ dconf write /org/gnome/desktop/background/picture-uri \
 | `system_files/overrides/usr/lib/jarvis/` | `/var/lib/jarvis/system/usr/lib/jarvis/` |
 | `system_files/overrides/usr/bin/` | `/var/lib/jarvis/system/usr/bin/` + symlinks in `/usr/local/bin` |
 | `system_files/overrides/usr/share/applications/` | `/usr/local/share/applications/` |
-| `system_files/overrides/usr/share/ublue-os/just/` | `/usr/local/share/ublue-os/just/` and `~/.config/ublue-os/just/` |
+| `system_files/overrides/usr/share/ublue-os/just/` | `/usr/local/share/ublue-os/just/`, imported by `~/.config/jarvis/justfile` via `/usr/local/bin/ujust` |
 | `system_files/overrides/etc/systemd/system/ollama.service` | `/etc/systemd/system/ollama.service` |
 | `branding/assets/wallpaper.png` | `/var/lib/jarvis/branding/wallpaper.png` |
 | voice models | `/var/lib/jarvis/voice/models/` |

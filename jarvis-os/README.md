@@ -30,7 +30,7 @@ cd jarvis/jarvis-os
 The script asks for sudo itself. It installs:
 
 * the JARVIS payload in `/var/lib/jarvis/system` (survives atomic updates),
-* commands in `/usr/local/bin`: `jarvis-assist`, `jarvis-voice`, `jarvis-firstboot`,
+* commands in `/usr/local/bin`: `jarvis-assist`, `jarvis-voice`, `jarvis-firstboot`, and a `ujust` wrapper that adds the JARVIS recipes,
 * desktop entries and icons in `/usr/local/share`,
 * the Ollama service in `/etc/systemd/system` (downloads Ollama if missing),
 * a user service for the assistant backend,

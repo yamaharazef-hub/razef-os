@@ -76,7 +76,9 @@ uninstall() {
         /usr/local/share/icons/hicolor/scalable/apps/jarvis-os.png
   rm -rf "$TARGET_HOME/.config/systemd/user/jarvis-assist.service" \
          "$TARGET_HOME/.config/ublue-os/just/60-jarvis.just" \
+         "$TARGET_HOME/.config/jarvis/justfile" \
          /usr/local/share/ublue-os/just/60-jarvis.just
+  rm -f /usr/local/bin/ujust
   rm -rf "$PAYLOAD" "$VOICE_DATA" /var/lib/jarvis/branding
   command -v update-desktop-database >/dev/null 2>&1 && \
     update-desktop-database /usr/local/share/applications 2>/dev/null || true
@@ -276,12 +278,28 @@ run_as_user env JARVIS_VOICE_CONFIG="$TARGET_HOME/.config/jarvis/voice/config.js
   || warn "could not write the voice config for $TARGET_USER"
 
 say "Installing ujust recipes"
-install -d -m0755 /usr/local/share/ublue-os/just "$TARGET_HOME/.config/ublue-os/just"
+install -d -m0755 /usr/local/share/ublue-os/just "$TARGET_HOME/.config/ublue-os/just" \
+  "$TARGET_HOME/.config/jarvis"
 install -m0644 "$SRC/system_files/overrides/usr/share/ublue-os/just/60-jarvis.just" \
   /usr/local/share/ublue-os/just/60-jarvis.just
 install -m0644 "$SRC/system_files/overrides/usr/share/ublue-os/just/60-jarvis.just" \
   "$TARGET_HOME/.config/ublue-os/just/60-jarvis.just"
-chown -R "$TARGET_USER:$TARGET_GROUP" "$TARGET_HOME/.config/ublue-os"
+
+# ujust hard-codes /usr/share/ublue-os/justfile, which is part of the immutable
+# image. A wrapper in /usr/local/bin composes that justfile with ours so the
+# recipes survive Bazzite updates without touching /usr.
+cat >"$TARGET_HOME/.config/jarvis/justfile" <<EOF
+import? "/usr/share/ublue-os/justfile"
+import? "/usr/local/share/ublue-os/just/60-jarvis.just"
+EOF
+cat >"$BIN_DIR/ujust" <<'EOF'
+#!/bin/sh
+# JARVIS-aware ujust: Universal Blue recipes + JARVIS recipes.
+JUST_JUSTFILE="${HOME}/.config/jarvis/justfile" exec /usr/bin/just --unstable "$@"
+EOF
+chmod 0755 "$BIN_DIR/ujust"
+chown -R "$TARGET_USER:$TARGET_GROUP" "$TARGET_HOME/.config/ublue-os" \
+  "$TARGET_HOME/.config/jarvis"
 
 install_branding
 

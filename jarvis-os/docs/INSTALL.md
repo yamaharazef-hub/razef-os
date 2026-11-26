@@ -19,11 +19,12 @@ repairs or refreshes the installation.
 | Step | Detail |
 |---|---|
 | Payload | copies `system_files/overrides/usr/lib/jarvis` to `/var/lib/jarvis/system` |
-| Commands | symlinks `jarvis-assist`, `jarvis-voice`, `jarvis-firstboot` into `/usr/local/bin` |
+| Commands | symlinks `jarvis-assist`, `jarvis-voice`, `jarvis-firstboot` into `/usr/local/bin`, plus a `ujust` wrapper |
 | Desktop | installs `.desktop` files and icons under `/usr/local/share` |
 | Ollama | downloads the static tarball into `/var/lib/jarvis/system/ollama` if `ollama` is not on `PATH`; enables `/etc/systemd/system/ollama.service` |
 | Voice | creates `/var/lib/jarvis/voice/venv`, installs Vosk, downloads Piper and the offline models |
 | User service | writes `~/.config/systemd/user/jarvis-assist.service` for the invoking user and starts it |
+| ujust | writes `~/.config/jarvis/justfile` importing system + JARVIS recipes, and `/usr/local/bin/ujust` to use it |
 | Branding | sets the wallpaper and `Super+Alt+J` for the invoking user |
 
 Only `/etc/systemd/system/ollama.service` and a few dconf keys are written

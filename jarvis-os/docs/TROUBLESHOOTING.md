@@ -2,6 +2,16 @@
 
 ## Installer
 
+**`ujust jarvis-ai`: “justfile does not contain recipe”**
+
+The installed `ujust` wrapper composes the system justfile with JARVIS recipes.
+Re-run `./install.sh`, then open a new shell (`hash -r`). Check with:
+
+```bash
+ujust --list | grep jarvis
+cat ~/.config/jarvis/justfile
+```
+
 **`jarvis-voice: command not found`**
 
 The symlinks live in `/usr/local/bin`. Open a new shell, or re-run:
