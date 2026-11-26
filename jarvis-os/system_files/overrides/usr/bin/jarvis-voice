@@ -1,0 +1,16 @@
+#!/usr/bin/env python3
+"""Launcher for the JARVIS voice-control CLI."""
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+LIB = Path(__file__).resolve().parent.parent / "lib" / "jarvis" / "voice"
+os.environ.setdefault("JARVIS_VOICE_LIB", str(LIB))
+sys.path.insert(0, os.environ["JARVIS_VOICE_LIB"])
+
+from cli import main  # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

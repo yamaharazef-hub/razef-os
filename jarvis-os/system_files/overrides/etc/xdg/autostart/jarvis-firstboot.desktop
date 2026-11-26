@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=JARVIS Setup
+Comment=First-run setup for JARVIS OS
+Exec=/usr/bin/jarvis-firstboot --autostart
+Icon=jarvis-os
+Terminal=false
+OnlyShowIn=GNOME;
+X-GNOME-Autostart-Delay=8
+NoDisplay=false

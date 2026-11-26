@@ -1,0 +1,16 @@
+[Unit]
+Description=JARVIS Assistant backend
+Documentation=man:jarvis-assist(1)
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/jarvis-assist --serve
+Restart=on-failure
+RestartSec=2
+Environment=JARVIS_LOCAL=1
+Environment=JARVIS_VOICE_AUTOSTART=1
+
+[Install]
+WantedBy=default.target
