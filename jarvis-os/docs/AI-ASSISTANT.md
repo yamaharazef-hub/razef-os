@@ -17,12 +17,12 @@ For the speech stack see [VOICE-CONTROL.md](VOICE-CONTROL.md).
 
 | Piece | Path |
 |---|---|
-| Launcher (GTK4+WebKit 6 → GTK3+WebKit2 → browser) | `/usr/bin/jarvis-assist` |
-| Backend (stdlib only) | `/usr/lib/jarvis/assist/server.py` |
-| UI (one self-contained HTML file) | `/usr/lib/jarvis/assist/ui/index.html` |
+| Launcher (GTK4+WebKit 6 → GTK3+WebKit2 → browser) | `/usr/local/bin/jarvis-assist` → `/var/lib/jarvis/system/usr/bin/jarvis-assist` |
+| Backend (stdlib only) | `/var/lib/jarvis/system/usr/lib/jarvis/assist/server.py` |
+| UI (one self-contained HTML file) | `/var/lib/jarvis/system/usr/lib/jarvis/assist/ui/index.html` |
 | Engine service | `/etc/systemd/system/ollama.service` |
 | User service for the backend | `/usr/lib/systemd/user/jarvis-assist.service` |
-| Voice modules (parser, actions, STT/TTS) | `/usr/lib/jarvis/voice/` |
+| Voice modules (parser, actions, STT/TTS) | `/var/lib/jarvis/system/usr/lib/jarvis/voice/` |
 
 The backend binds to `127.0.0.1` only. There is no telemetry, no account, and no
 outbound request except the model downloads you trigger yourself.
@@ -83,7 +83,7 @@ user ──▶ model ──▶ ```jarvis-action {"action":"open_app","args":{"ap
 user ◀── short answer ◀── model ◀── result event ◀──┘
 ```
 
-The action registry lives in `/usr/lib/jarvis/voice/actions.py`. It is a small
+The action registry lives in `voice/actions.py` in this repo (installed under `/var/lib/jarvis/system/usr/lib/jarvis/voice/`). It is a small
 allowlist with fixed argv lists and strict validators; nothing model-supplied
 is passed to a shell. Actions are graded:
 

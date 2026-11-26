@@ -16,7 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from config import MODEL_DIR, load_config, save_config  # noqa: E402
+from config import MODEL_DIR, _system_model, load_config, save_config  # noqa: E402
 
 VOSK_URL = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
 PIPER_BASE = (
@@ -49,6 +49,10 @@ def fetch(url: str, target: Path) -> None:
 def install_stt(force: bool = False) -> int:
     cfg = load_config()
     target = MODEL_DIR / str(cfg["stt_model"])
+    shipped = _system_model(str(cfg["stt_model"]))
+    if shipped and shipped.is_dir() and not force:
+        print(f"  STT model already installed: {shipped}")
+        return 0
     if target.is_dir() and not force:
         print(f"  STT model already installed: {target}")
         return 0
@@ -77,6 +81,10 @@ def install_tts(force: bool = False) -> int:
     folder = MODEL_DIR / "piper"
     model = folder / f"{voice}.onnx"
     meta = folder / f"{voice}.onnx.json"
+    shipped = _system_model(f"piper/{voice}.onnx")
+    if shipped and shipped.exists() and not force:
+        print(f"  TTS voice already installed: {shipped}")
+        return 0
     if model.exists() and meta.exists() and not force:
         print(f"  TTS voice already installed: {model}")
         return 0

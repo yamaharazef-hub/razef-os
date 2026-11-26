@@ -204,7 +204,7 @@ def _argv_timer(args):
         "systemd-run", "--user", "--collect",
         f"--on-active={seconds}s",
         "--unit=jarvis-timer",
-        "/usr/bin/jarvis-voice", "speak", "Timer finished.",
+        "jarvis-voice", "speak", "Timer finished.",
     ]
 
 
@@ -212,7 +212,7 @@ def _argv_diagnostic(args):
     name = str(args.get("tool", ""))
     if name not in DIAGNOSTICS:
         raise ActionError("diagnostic is not on the allowlist")
-    return ["/usr/bin/jarvis-assist", "--diagnostic", name]
+    return ["jarvis-assist", "--diagnostic", name]
 
 
 def _argv_user_service(args):

@@ -38,13 +38,27 @@ MODEL_DIR = Path(
         Path.home() / ".local" / "share" / "jarvis" / "voice" / "models",
     )
 )
-# The image ships a read-only copy so voice works on first boot; a user-level
-# download in MODEL_DIR takes precedence when present.
-SYSTEM_MODEL_DIR = Path("/usr/share/jarvis/voice/models")
-VENV_PYTHON = Path("/usr/lib/jarvis/voice/venv/bin/python")
-PIPER_BIN = Path("/usr/lib/jarvis/voice/bin/piper")
-RECORD_BIN = "/usr/bin/arecord"
-PLAY_BIN = "/usr/bin/aplay"
+# Shipped/downloaded models are searched in these locations, in order. A
+# user-level download in MODEL_DIR always takes precedence.
+SYSTEM_MODEL_DIRS = [
+    Path(p) for p in os.environ.get(
+        "JARVIS_VOICE_MODELS_SYSTEM",
+        "/usr/share/jarvis/voice/models:/var/lib/jarvis/voice/models",
+    ).split(os.pathsep) if p
+]
+VOICE_DIR = Path(__file__).resolve().parent
+VENV_PYTHON = Path(os.environ.get("JARVIS_VOICE_VENV", str(VOICE_DIR / "venv" / "bin" / "python")))
+PIPER_BIN = Path(os.environ.get("JARVIS_VOICE_PIPER", str(VOICE_DIR / "bin" / "piper")))
+RECORD_BIN = os.environ.get("JARVIS_RECORD_BIN", "/usr/bin/arecord")
+PLAY_BIN = os.environ.get("JARVIS_PLAY_BIN", "/usr/bin/aplay")
+
+
+def _system_model(name: str) -> Path | None:
+    for folder in SYSTEM_MODEL_DIRS:
+        candidate = folder / name
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def load_config() -> dict:
@@ -73,16 +87,16 @@ def save_config(patch: dict) -> dict:
 def stt_model_path(cfg: dict | None = None) -> Path:
     cfg = cfg or load_config()
     user_path = MODEL_DIR / str(cfg["stt_model"])
-    shipped = SYSTEM_MODEL_DIR / str(cfg["stt_model"])
-    return user_path if user_path.is_dir() or not shipped.is_dir() else shipped
+    shipped = _system_model(str(cfg["stt_model"]))
+    return user_path if user_path.is_dir() or shipped is None else shipped
 
 
 def tts_model_path(cfg: dict | None = None) -> Path:
     cfg = cfg or load_config()
     voice = str(cfg["tts_voice"])
     user_path = MODEL_DIR / "piper" / f"{voice}.onnx"
-    shipped = SYSTEM_MODEL_DIR / "piper" / f"{voice}.onnx"
-    return user_path if user_path.exists() or not shipped.exists() else shipped
+    shipped = _system_model(f"piper/{voice}.onnx")
+    return user_path if user_path.exists() or shipped is None else shipped
 
 
 def stt_ready(cfg: dict | None = None) -> bool:

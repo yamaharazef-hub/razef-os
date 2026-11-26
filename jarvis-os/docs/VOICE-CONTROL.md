@@ -19,7 +19,8 @@ account, no audio leaving the computer.
 
 ## First-time setup
 
-The setup wizard offers **Enable hands-free voice control**. From a terminal:
+`./install.sh` enables hands-free voice control by default. If you skipped the
+model download, finish it from a terminal:
 
 ```bash
 ujust jarvis-voice-setup      # downloads ~40 MB STT + ~60 MB TTS models
@@ -27,8 +28,8 @@ jarvis-voice test             # checks models, engine and parser
 jarvis-voice listen-once      # say something; prints what was heard
 ```
 
-The small models are also baked into the image in
-`/usr/share/jarvis/voice/models`, so voice normally works immediately. A
+The installer downloads the small models into
+`/var/lib/jarvis/voice/models`, so voice works right after installation. A
 user-level download in `~/.local/share/jarvis/voice/models` takes precedence.
 
 ## Using it
@@ -110,13 +111,13 @@ The UI writes this file through `/api/voice/config`; you can also use
 
 | Path | Purpose |
 |---|---|
-| `/usr/bin/jarvis-voice` | CLI: `setup`, `status`, `speak`, `listen-once`, `start`, `stop`, `toggle`, `test`, `confirm`, `actions` |
-| `/usr/lib/jarvis/voice/stt_worker.py` | Vosk + `arecord` worker, emits JSON events |
-| `/usr/lib/jarvis/voice/commands.py` | deterministic phrase parser |
-| `/usr/lib/jarvis/voice/actions.py` | allowlist, validation, confirmations, audit log |
-| `/usr/lib/jarvis/voice/tts.py` | Piper TTS with espeak-ng fallback |
-| `/usr/lib/jarvis/assist/server.py` | event bus, listener lifecycle, action execution |
-| `/usr/lib/systemd/user/jarvis-assist.service` | starts backend and, if enabled, the listener |
+| `/usr/local/bin/jarvis-voice` → `/var/lib/jarvis/system/usr/bin/jarvis-voice` | CLI: `setup`, `status`, `speak`, `listen-once`, `start`, `stop`, `toggle`, `test`, `confirm`, `actions` |
+| `/var/lib/jarvis/system/usr/lib/jarvis/voice/stt_worker.py` | Vosk + `arecord` worker, emits JSON events |
+| `/var/lib/jarvis/system/usr/lib/jarvis/voice/commands.py` | deterministic phrase parser |
+| `/var/lib/jarvis/system/usr/lib/jarvis/voice/actions.py` | allowlist, validation, confirmations, audit log |
+| `/var/lib/jarvis/system/usr/lib/jarvis/voice/tts.py` | Piper TTS with espeak-ng fallback |
+| `/var/lib/jarvis/system/usr/lib/jarvis/assist/server.py` | event bus, listener lifecycle, action execution |
+| `~/.config/systemd/user/jarvis-assist.service` | starts backend and, if enabled, the listener |
 
 Backend endpoints used by the UI and CLI:
 
@@ -142,7 +143,7 @@ GET  /api/actions           POST /api/actions/confirm
 |---|---|
 | “Run `jarvis-voice setup` first” | models or private venv missing; run `ujust jarvis-voice-setup` |
 | No microphone detected | `wpctl status`, check the input in GNOME Settings → Sound |
-| “Command not installed: arecord” | `sudo rpm-ostree install alsa-utils` + reboot, or rebuild the image |
+| “Command not installed: arecord” | `rpm-ostree install alsa-utils` + reboot, then re-run `./install.sh` |
 | Wake word never fires | check the sidebar switch; `jarvis-voice set --wake`; try push-to-talk |
 | It hears its own replies | enable the wake word or lower the speaker volume |
 | Robotic voice | Piper model missing; `jarvis-voice setup`, or `espeak-ng` fallback is in use |

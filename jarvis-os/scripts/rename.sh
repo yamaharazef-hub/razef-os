@@ -131,7 +131,7 @@ PY
 
 echo
 echo "Next steps:"
-echo "  1. Replace the artwork:  branding/master/{logo,wallpaper}.png  then  just brand"
+echo "  1. Replace the artwork:  branding/master/{logo,wallpaper}.png  then  python3 branding/build-assets.py"
 echo "  2. Check the diff:       git diff --stat"
-echo "  3. Validate:             just check && just check-python"
-echo "  4. Update image-template.env (IMAGE_NAME / REPO_ORGANIZATION) before CI runs."
+echo "  3. Validate:             python3 -m unittest discover -s tests -v"
+echo "  4. Uninstall and re-install: sudo ./install.sh --uninstall && ./install.sh"

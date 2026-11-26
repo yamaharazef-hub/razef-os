@@ -1,38 +1,33 @@
-# Customising JARVIS OS
+# Customising JARVIS
 
-Everything in this image is a file in this repo. Nothing is patched by hand, so
-every change is reviewable, diffable and reversible.
+JARVIS is a plain directory of files installed on top of Bazzite. Nothing is
+patched by hand: edit a file here, re-run `./install.sh`, and the change is live.
 
 ---
 
-## 1. Rename the OS
+## 1. Names and appearance
+
+| What | File |
+|---|---|
+| Assistant name / system prompt | `system_files/overrides/usr/lib/jarvis/assist/server.py` |
+| UI title, colours, quick actions | `system_files/overrides/usr/lib/jarvis/assist/ui/index.html` |
+| App names and comments | `system_files/overrides/usr/share/applications/*.desktop` |
+| Wallpaper + hotkey defaults | `install.sh` (function `install_branding`) |
+| Logo, splash, wallpaper source art | `branding/master/` |
+
+To change the whole name, the repo still contains `scripts/rename.sh`, which
+rewrites text files in this checkout:
 
 ```bash
-./scripts/rename.sh "Nova OS" nova
+./scripts/rename.sh "Friday" friday
+./install.sh --uninstall && ./install.sh
 ```
 
-That rewrites `JARVIS` → `Nova OS` and `jarvis`/`jarvis-os` → `nova`/`nova-os` in
-every text file (os-release, boot splash title, wizard, assistant, desktop
-entries, CI, docs) and renames the matching directories. Review with
-`git diff`, then commit.
-
-Places where the name appears, if you prefer to do it by hand:
-
-| File | What |
-|---|---|
-| `build_files/build.sh` | `/usr/lib/os-release`, `/etc/issue` |
-| `branding/build-assets.py` | docstring only (art is generated) |
-| `system_files/overrides/usr/share/plymouth/themes/*/` | `Title=` / `SubTitle=` |
-| `system_files/overrides/usr/bin/jarvis-firstboot` | `BRAND`, `APP_ID` |
-| `system_files/overrides/usr/lib/jarvis/assist/*` | UI title, system prompt |
-| `system_files/overrides/usr/share/applications/*.desktop` | app names |
-| `image-template.env`, `Containerfile` | image name + labels |
+Uninstall first so old command names are removed from `/usr/local/bin`.
 
 ---
 
-## 2. Branding / artwork
-
-### Swap the art
+## 2. Branding artwork
 
 ```
 branding/master/logo.png        bright mark on a pure black background, square
@@ -40,126 +35,45 @@ branding/master/wallpaper.png   any 16:9 image, 2560x1440 or larger
 ```
 
 ```bash
-just brand
+python3 -m pip install pillow numpy
+python3 branding/build-assets.py
 ```
 
-`branding/build-assets.py` then produces, in `branding/assets/`:
+This produces the logo sizes, boot splash, 36-frame spinner and wallpapers in
+`branding/assets/`. Re-run `./install.sh` to reinstall the wallpaper and icons.
 
-| Asset | Used for |
-|---|---|
-| `logo-1024/512/256/128.png` | app icon, About screen, GDM logo |
-| `watermark.png` | the plymouth boot splash mark (with a baked-in bloom) |
-| `throbber-0001..0036.png` | the boot spinner (10 dots, cyan→violet trail) |
-| `box.png`, `lock.png` | disk-encryption password dialog chrome |
-| `wallpaper.png`, `wallpaper-4k.png` | desktop wallpaper, graded + vignetted |
+Change the palette with `CYAN` / `VIOLET` at the top of
+`branding/build-assets.py`, and `--cyan` / `--violet` in the assistant UI CSS.
 
-The logo pipeline knocks the black background out of `master/logo.png` using
-luminance-as-alpha, keeps the outer bloom as a soft falloff, and **re-colours the
-mark from a brand gradient** so it stays saturated at every size. If you want to
-keep your own colours instead, delete the gradient block in `load_mark()`.
-
-### Change the colours
-
-* Art / boot splash: `CYAN` and `VIOLET` at the top of `branding/build-assets.py`.
-* Boot splash background: `BackgroundStartColor` / `BackgroundEndColor` in
-  `system_files/overrides/usr/share/plymouth/themes/jarvis/jarvis.plymouth`
-  (format `0xRRGGBB`).
-* Assistant UI: `--cyan`, `--violet`, `--bg` in the `<style>` block of
-  `system_files/overrides/usr/lib/jarvis/assist/ui/index.html`.
-* Desktop defaults: `etc/dconf/db/distro.d/02-jarvis`.
-
-### Boot splash specifics
-
-JARVIS uses plymouth's `two-step` module (the same one Fedora's spinner uses):
-centred watermark, optional title, throbber underneath, progress bar on shutdown.
-
-The theme is selected in `/etc/plymouth/plymouthd.conf` and the **initramfs is
-regenerated during the build** — without that step the splash only appears once
-the root filesystem is mounted, which looks like a flicker instead of a boot
-experience. `build_files/build.sh` verifies the theme actually landed inside the
-initramfs and fails the build if it did not:
-
-```
-OK: jarvis plymouth theme is inside the initramfs
-```
-
-If you change the theme after the image is built, users can re-apply it with:
-
-```bash
-sudo dracut --force --regenerate-all
-```
-
-### The GRUB menu
-
-The *content* of the boot menu comes from BLS entries, but the distributor name
-and the menu's title are configurable:
-
-```bash
-ujust jarvis-rebrand-bootloader     # sets GRUB_DISTRIBUTOR="JARVIS", re-runs grub2-mkconfig
-```
-
-The firmware (BIOS/UEFI) logo cannot be changed by any OS.
+> The Plymouth boot splash belongs to the OS image and is **not** changed by the
+> installer. Changing it on an installed Atomic system requires
+> `rpm-ostree usroverlay` and an initramfs rebuild, which does not survive the
+> next update. JARVIS therefore focuses on the logged-in desktop.
 
 ---
 
 ## 3. Adding packages
 
-**Flatpak (preferred — no reboot, no layering):** add to the wizard task list in
-`system_files/overrides/usr/bin/jarvis-firstboot` (class `FlatpakInstall`), or
-just document them for users.
-
-**Baked into the image:** add to the `dnf5 install` block in
-`build_files/build.sh`:
+JARVIS does not layer RPMs for you. Install extras yourself with the normal
+Atomic workflow:
 
 ```bash
-dnf5 install -y --setopt=install_weak_deps=False \
-    python3-gobject webkitgtk6.0 libadwaita \
-    htop neovim        # <- your packages
+flatpak install flathub com.example.App     # preferred, no reboot
+rpm-ostree install htop                     # needs a reboot
+ujust update                                # or: rpm-ostree upgrade
 ```
 
-Keep the list short. Every package grows the image and slows delta updates, and
-removals are impossible without a new build.
-
-**Homebrew** is already available (Bazzite ships it) for CLI tools without root.
+The voice installer needs `alsa-utils` for capture and `espeak-ng` as a TTS
+fallback. If they are missing, install them before running `./install.sh`.
 
 ---
 
-## 4. Changing the setup wizard
-
-`system_files/overrides/usr/bin/jarvis-firstboot` is a small task framework:
-
-```python
-class MyTask(Task):
-    key = "my_task"                     # unique id, stored in the state file
-    title = "Do the thing"
-    subtitle = "Short explanation shown in the wizard"
-    default_on = True                   # pre-ticked?
-    requires_network = False            # informational
-
-    def status(self) -> bool:           # True => already done, skip
-        return Path.home().joinpath(".thing").exists()
-
-    def apply(self, report) -> tuple[bool, str]:
-        report("writing ~/.thing …")    # sent to the wizard's log pane
-        Path.home().joinpath(".thing").write_text("ok")
-        return True, ""                 # (ok, error output)
-```
-
-Register it in `build_task_list()`. Tasks can freely fail — the wizard logs the
-error and continues.
-
-State lives in `/var/lib/jarvis/firstboot.json` and
-`~/.config/jarvis/firstboot.json`. Delete both (or `jarvis-firstboot --reset`) to
-see the wizard again.
-
----
-
-## 4b. Adding voice commands and actions
+## 4. Adding voice commands and actions
 
 Add a phrase mapping to `system_files/overrides/usr/lib/jarvis/voice/commands.py`
-(`parse()`), and a matching `ActionSpec` to `voice/actions.py`. Keep the action
-read-only unless it really needs to change state, and always build a **fixed argv
-list** from validated arguments:
+(`parse()`), and a matching `ActionSpec` in `voice/actions.py`. Keep the action
+read-only unless it really needs to change state, and always build a **fixed
+argv list** from validated arguments:
 
 ```python
 ActionSpec(
@@ -169,47 +83,43 @@ ActionSpec(
 )
 ```
 
-Then add a test in `tests/test_voice.py` and run `just test`. The UI discovers
-actions automatically through `GET /api/actions`.
+Add a test in `tests/test_voice.py` and run:
+
+```bash
+cd jarvis-os
+python3 -m unittest discover -s tests -v
+./install.sh
+```
+
+The UI discovers actions automatically via `GET /api/actions`.
+
+---
 
 ## 5. Desktop defaults
 
-`system_files/overrides/etc/dconf/db/distro.d/02-jarvis` is a dconf system
-database — the right place for defaults on an immutable image (it applies to new
-users and is overridable, unlike a `gschema.override` lock).
-
-Keys must be GVariant-encoded: strings in single quotes, booleans `true/false`,
-arrays `['a', 'b']`.
-
-Check the result without rebooting:
+The installer writes per-user dconf keys for the invoking user (background and
+`Super+Alt+J`). To ship different defaults, edit `install_branding()` in
+`install.sh`. GVariant values need quoting, for example:
 
 ```bash
-dconf read /org/gnome/desktop/background/picture-uri
+dconf write /org/gnome/desktop/background/picture-uri \
+  "'file:///var/lib/jarvis/branding/wallpaper.png'"
 ```
 
 ---
 
-## 6. CI knobs
+## 6. Where things are installed
 
-| What | Where |
+| Source | Installed location |
 |---|---|
-| Rebuild schedule | `.github/workflows/build.yml` → `cron` |
-| Extra hardware targets | the `matrix.include` list (`image` + `base`) |
-| Image signing | repo secret `SIGNING_SECRET` |
-| ISO app list | `iso/flatpaks` |
-| Publish to a registry other than ghcr.io | `IMAGE_REGISTRY` in `build.yml` |
+| `system_files/overrides/usr/lib/jarvis/` | `/var/lib/jarvis/system/usr/lib/jarvis/` |
+| `system_files/overrides/usr/bin/` | `/var/lib/jarvis/system/usr/bin/` + symlinks in `/usr/local/bin` |
+| `system_files/overrides/usr/share/applications/` | `/usr/local/share/applications/` |
+| `system_files/overrides/usr/share/ublue-os/just/` | `/usr/local/share/ublue-os/just/` and `~/.config/ublue-os/just/` |
+| `system_files/overrides/etc/systemd/system/ollama.service` | `/etc/systemd/system/ollama.service` |
+| `branding/assets/wallpaper.png` | `/var/lib/jarvis/branding/wallpaper.png` |
+| voice models | `/var/lib/jarvis/voice/models/` |
+| user service | `~/.config/systemd/user/jarvis-assist.service` |
 
-### Building locally
-
-```bash
-just build                                   # -> localhost/jarvis-os:stable
-just build mytest latest ghcr.io/ublue-os/bazzite-gnome:testing
-podman run --rm -it localhost/jarvis-os:stable bootc container lint
-```
-
-You need podman ≥ 4.9 and ~20 GB free. Cross-checking the image without booting:
-
-```bash
-podman run --rm localhost/jarvis-os:stable cat /usr/lib/os-release
-podman run --rm localhost/jarvis-os:stable ls /usr/share/plymouth/themes/
-```
+Because the payload is under `/var`, a Bazzite update never overwrites it.
+Re-running `./install.sh` after `git pull` is the update path for JARVIS.

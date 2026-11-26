@@ -443,9 +443,10 @@ def _run(argv: list[str], timeout: int = 12) -> str:
 
 TOOLS: dict[str, dict] = {
     "os_info": {
-        "desc": "JARVIS/bootc version, image reference and update status",
+        "desc": "JARVIS install version, OS release and rpm-ostree deployment",
         "argv": ["bash", "-lc",
-                 "cat /usr/lib/os-release | grep -E '^(NAME|VERSION|PRETTY_NAME|IMAGE_ID|JARVIS)';"
+                 "cat /usr/lib/os-release | grep -E '^(NAME|VERSION|PRETTY_NAME|IMAGE_ID)';"
+                 " echo '--- jarvis ---'; cat /var/lib/jarvis/VERSION 2>/dev/null || echo 'installer';"
                  " echo '--- rpm-ostree ---'; rpm-ostree status --booted 2>/dev/null | head -30"],
     },
     "hardware": {
@@ -611,8 +612,8 @@ def system_facts() -> str:
 
 
 SYSTEM_PROMPT = """\
-You are JARVIS Assistant, the built-in AI helper of JARVIS OS — a gaming-focused
-Linux distribution built on Bazzite (Fedora Atomic / bootc) with the GNOME desktop.
+You are JARVIS Assistant, the local AI helper installed on this Bazzite
+(Fedora Atomic) desktop with GNOME.
 
 Your job: help the user with *this* machine. That means Linux, gaming (Steam,
 Proton, gamescope, MangoHud, GameMode), drivers, controllers, audio, performance,
@@ -624,7 +625,7 @@ Current machine:
 House rules
 -----------
 1. Be concise and concrete. Prefer numbered steps and exact commands.
-2. JARVIS is immutable. Never tell the user to edit files under /usr or to
+2. This system is immutable. Never tell the user to edit files under /usr or to
    'dnf install' — use: flatpak install <app>, brew install <formula>,
    rpm-ostree install <pkg> (requires reboot), or ujust recipes.
 3. When you need live data about this machine, do NOT guess. Emit exactly one

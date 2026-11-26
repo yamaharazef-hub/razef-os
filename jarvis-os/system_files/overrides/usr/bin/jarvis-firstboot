@@ -43,7 +43,10 @@ VERSION = "1.0"
 FLATHUB = "https://dl.flathub.org/repo/flathub.flatpakrepo"
 
 # Voice helpers are optional at firstboot time (older images may not have them).
-VOICE_LIB = Path("/usr/lib/jarvis/voice")
+VOICE_LIB = Path(os.environ.get(
+    "JARVIS_VOICE_LIB",
+    Path(__file__).resolve().parent.parent / "lib" / "jarvis" / "voice",
+))
 if VOICE_LIB.is_dir():
     sys.path.insert(0, str(VOICE_LIB))
 try:

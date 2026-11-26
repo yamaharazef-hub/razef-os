@@ -2,10 +2,11 @@
 
 ```
 master/logo.png  ──┐
-master/wallpaper.png ─┴─▶ build-assets.py ──▶ assets/*.png ──▶ build.sh ──▶ image
+master/wallpaper.png ─┴─▶ build-assets.py ──▶ assets/*.png ──▶ install.sh ──▶ Bazzite desktop
 ```
 
-`master/` is the source of truth: replace those two files and run `just brand`.
+`master/` is the source of truth: replace those two files and run
+`python3 branding/build-assets.py` (see the Requirements section below).
 
 ## What the logo pipeline does to `master/logo.png`
 

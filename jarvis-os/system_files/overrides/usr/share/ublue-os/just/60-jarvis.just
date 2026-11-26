@@ -8,14 +8,14 @@
 jarvis-setup:
     #!/usr/bin/env bash
     set -euo pipefail
-    /usr/bin/jarvis-firstboot --force
+    jarvis-firstboot --force
 
 # Forget the first-run wizard so it shows up again on next login
 [group('JARVIS')]
 jarvis-setup-reset:
     #!/usr/bin/env bash
     set -euo pipefail
-    /usr/bin/jarvis-firstboot --reset
+    jarvis-firstboot --reset
     echo "Done. The wizard will run on your next login."
 
 # Launch the JARVIS AI assistant
@@ -23,7 +23,7 @@ jarvis-setup-reset:
 jarvis-ai:
     #!/usr/bin/env bash
     set -euo pipefail
-    exec /usr/bin/jarvis-assist
+    exec jarvis-assist
 
 # Show the state of the local AI engine
 [group('JARVIS')]
@@ -87,7 +87,7 @@ jarvis-rebrand-bootloader:
 jarvis-voice-setup:
     #!/usr/bin/env bash
     set -euo pipefail
-    /usr/bin/jarvis-voice setup
+    jarvis-voice setup
     systemctl --user enable --now jarvis-assist.service
     echo "Voice control is ready. Press Super+Alt+J or use the microphone button."
 
@@ -96,14 +96,14 @@ jarvis-voice-setup:
 jarvis-voice-status:
     #!/usr/bin/env bash
     set -euo pipefail
-    /usr/bin/jarvis-voice status
+    jarvis-voice status
 
 # Run the offline voice self-test
 [group('JARVIS')]
 jarvis-voice-test:
     #!/usr/bin/env bash
     set -euo pipefail
-    /usr/bin/jarvis-voice test
+    jarvis-voice test
 
 # Allow (or forbid) arbitrary voice-typed shell commands. Always confirmed first.
 [group('JARVIS')]
@@ -111,10 +111,10 @@ jarvis-voice-unlock allow="on":
     #!/usr/bin/env bash
     set -euo pipefail
     if [[ "{{ allow }}" == "on" ]]; then
-        /usr/bin/jarvis-voice set --free-form
+        jarvis-voice set --free-form
         echo "Arbitrary commands enabled. They still require 'confirm command'."
     else
-        /usr/bin/jarvis-voice set --no-free-form
+        jarvis-voice set --no-free-form
         echo "Arbitrary commands disabled."
     fi
 

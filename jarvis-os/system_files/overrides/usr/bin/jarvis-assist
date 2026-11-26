@@ -27,7 +27,10 @@ from pathlib import Path
 
 PORT = int(os.environ.get("JARVIS_ASSIST_PORT", "8765"))
 URL = f"http://127.0.0.1:{PORT}/"
-SERVER = "/usr/lib/jarvis/assist/server.py"
+# Resolve relative to this script so a symlink from /usr/local/bin works with
+# an installation under /var/lib/jarvis/system as well as the OS image path.
+LIB_ROOT = Path(__file__).resolve().parent.parent / "lib" / "jarvis"
+SERVER = os.environ.get("JARVIS_ASSIST_SERVER", str(LIB_ROOT / "assist" / "server.py"))
 TITLE = "JARVIS Assistant"
 
 

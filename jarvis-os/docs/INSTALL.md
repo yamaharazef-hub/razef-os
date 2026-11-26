@@ -1,143 +1,79 @@
-# Installing JARVIS OS
+# Installing JARVIS on Bazzite
 
-Three routes, easiest first.
+This is a **layer on top of an existing Bazzite / Fedora Atomic installation**.
+It does not replace your OS, rebase an image or touch your files.
 
----
-
-## A. Rebase an existing Bazzite / Fedora Atomic install
-
-No reinstall. Your files, Flatpaks and home directory stay exactly where they are.
-Only the OS image is replaced.
+## Install
 
 ```bash
-# 1. Check you are actually on an atomic system
-rpm-ostree status
-
-# 2. Switch to JARVIS
-sudo bootc switch ghcr.io/<your-username>/jarvis-os:stable
-
-# 3. Reboot
-sudo systemctl reboot
+git clone <this-repo> jarvis
+cd jarvis/jarvis-os
+./install.sh
 ```
 
-If your machine is older and `bootc` is not present:
+The script re-execs itself with `sudo`. It is idempotent — running it again
+repairs or refreshes the installation.
+
+### What it does
+
+| Step | Detail |
+|---|---|
+| Payload | copies `system_files/overrides/usr/lib/jarvis` to `/var/lib/jarvis/system` |
+| Commands | symlinks `jarvis-assist`, `jarvis-voice`, `jarvis-firstboot` into `/usr/local/bin` |
+| Desktop | installs `.desktop` files and icons under `/usr/local/share` |
+| Ollama | downloads the static tarball into `/var/lib/jarvis/system/ollama` if `ollama` is not on `PATH`; enables `/etc/systemd/system/ollama.service` |
+| Voice | creates `/var/lib/jarvis/voice/venv`, installs Vosk, downloads Piper and the offline models |
+| User service | writes `~/.config/systemd/user/jarvis-assist.service` for the invoking user and starts it |
+| Branding | sets the wallpaper and `Super+Alt+J` for the invoking user |
+
+Only `/etc/systemd/system/ollama.service` and a few dconf keys are written
+outside `/var` and `/usr/local`.
+
+### Options
 
 ```bash
-sudo rpm-ostree rebase ostree-image-signed:docker://ghcr.io/<your-username>/jarvis-os:stable
+./install.sh --no-models       # skip speech + model downloads
+./install.sh --no-branding     # keep wallpaper and shortcuts as they are
+./install.sh --uninstall       # remove the JARVIS layer
 ```
 
-**NVIDIA?** Use `jarvis-os-nvidia:stable` — it is built on
-`bazzite-gnome-nvidia-open` and carries the driver. Switching between the AMD and
-NVIDIA images on the same machine works, but you must switch to the matching
-variant for your GPU.
-
-### Rolling back
-
-Every deployment is kept. At boot, old deployments are in the GRUB menu under
-“Previous”. From a running system:
-
-```bash
-rpm-ostree rollback
-sudo systemctl reboot
-```
-
-Or go back to stock Bazzite:
-
-```bash
-sudo bootc switch ghcr.io/ublue-os/bazzite-gnome:stable
-```
-
-### Signed images (optional but recommended)
-
-If you set the `SIGNING_SECRET` repository secret, CI signs every image with
-cosign. Then you can enforce it:
-
-```bash
-sudo bootc switch --enforce-container-sigpolicy ghcr.io/<your-username>/jarvis-os:stable
-```
-
----
-
-## B. Live installer ISO
-
-```bash
-# in your fork
-gh workflow run "Build JARVIS OS installer ISO" \
-  -f image=jarvis-os -f tag=stable
-gh run watch
-gh run download --name jarvis-stable-iso
-```
-
-Write it to a USB stick (this **erases the stick**):
-
-```bash
-lsblk                                   # find your stick, e.g. /dev/sdb
-sudo dd if=jarvis-stable-live-amd64.iso of=/dev/sdb bs=4M status=progress oflag=sync
-```
-
-Boot from it. The live environment carries the JARVIS splash before the desktop
-appears; run the installer from the desktop. The installed system is the same
-container image, so updates work identically afterwards.
-
-Local alternative (needs podman, ~15 GB free):
-
-```bash
-just build-iso        # output/bootiso/install.iso
-```
-
----
-
-## C. Try it in a VM first (recommended)
-
-```bash
-just build-qcow2      # output/qcow2/disk.qcow2
-just run-vm-qcow2     # opens http://localhost:8006 (web console)
-```
-
-The VM gets 4 cores / 8 GB RAM / 64 GB disk by default — enough for the desktop
-and a small AI model, not enough for gaming or the 8B model.
-
-With plain QEMU instead:
-
-```bash
-qemu-system-x86_64 -enable-kvm -m 8192 -smp 4 \
-  -drive file=output/qcow2/disk.qcow2,if=virtio \
-  -bios /usr/share/ovmf/OVMF.fd
-```
-
-> Testing the boot splash in a VM: shutdown and restart within the VM shows the
-> Plymouth splash. The very first boot shows the firmware logo longer than bare
-> metal, which is normal.
-
----
+Uninstall leaves `/var/lib/ollama/models` and your AI model choice alone.
 
 ## After installing
 
-1. **First login** → the JARVIS Setup wizard opens (~8 s delay). It needs network
-   for the Flatpak and model downloads; everything else works offline.
-2. If you dismissed it: `ujust jarvis-setup`.
-3. Model download is the slow part (1.7–8 GB depending on the model). It runs in
-   the background of the wizard with a progress log; you can close the wizard and
-   `ujust jarvis-ai-models` later.
-
-### Verifying the install
-
 ```bash
-cat /usr/lib/os-release | head -3      # NAME="JARVIS"
-ujust jarvis-about                      # version + deployment
-systemctl status ollama                # AI engine
-jarvis-assist                           # open the assistant
-jarvis-voice status                     # voice models + listener
+ujust jarvis-ai                # open the assistant
+ujust jarvis-ai-models         # download a local model (1–8 GB)
+ujust jarvis-voice-status      # voice engine state
+ujust jarvis-voice-test        # offline self-test
 ```
 
----
+Say **“Jarvis, volume up”** or press **Super+Alt+J** to start voice control.
+Log out and back in once if the hotkey or user service is not active yet.
 
-## Hardware notes
+## Requirements
 
-| | |
-|---|---|
-| **GPU** | AMD/Intel recommended (stock image). NVIDIA → use the `-nvidia` image. |
-| **Secure Boot** | Works with Universal Blue's enrolled key. If you switched from stock Fedora with your own keys, you may need to re-enrol. |
-| **Disk** | 25 GB minimum for the OS + Flatpaks; add the model size (1–13 GB) for the assistant and ~100 MB for the offline voice models. |
-| **RAM** | 8 GB works, 16 GB comfortable. The assistant loads the model into RAM/VRAM. |
-| **Dual boot** | Bootc images install their own ESP entries; Windows dual boot is fine but back up first. |
+* Bazzite / Fedora Atomic with GNOME.
+* `sudo`, `curl`, `python3`. `zstd` is needed only when Ollama is not already installed.
+* Network access for the one-time downloads; everything runs offline afterwards.
+* 8 GB RAM minimum, 16 GB recommended, plus disk for the AI model you pick.
+
+## Updating JARVIS
+
+```bash
+cd jarvis/jarvis-os
+git pull
+./install.sh                   # re-copies payload and refreshes services
+```
+
+Bazzite system updates do not remove JARVIS because the payload lives in `/var`.
+
+## Troubleshooting
+
+```bash
+journalctl --user -u jarvis-assist -f
+systemctl status ollama --no-pager
+jarvis-voice status
+```
+
+See **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** for a longer list.
